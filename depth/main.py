@@ -1,22 +1,24 @@
-import _thread
+import struct
 import time
-from machine import Pin, I2C, PWM
+
+from machine import I2C, Pin
 from MS5837 import MS5837
 
-i2c = I2C(0, scl=Pin(5), sda=Pin(4), freq=50000)
-#i2c = I2C(0, freq=399361, scl=5, sda=4, timeout=50000)
-#print(i2c.scan())
-#i2c = I2C(0, freq=100000)
+i2c = I2C(0, scl=Pin(5), sda=Pin(4), freq=100000)
+# i2c = I2C(0, freq=399361, scl=5, sda=4, timeout=50000)
+# print(i2c.scan())
+
 sensor = MS5837(i2c)
 print(sensor.init())
 sensor.setModel(sensor.MS5837_30BA)
-#sensor.setModel(sensor.MS5837_30BA)
 sensor.setFluidDensity(997)
-led = Pin(25, Pin.OUT)
-stat = 0
+
+fmt = "<id"
+sequence = 0
+
 while True:
     # 改行コードはCR+LFでPCから送信する
-    #115200bps
+    # 115200bps
     """
     key = input()
     if key == "d":
@@ -27,15 +29,17 @@ while True:
         #time.sleep(1)
         stat = 1 - stat
     """
+    sequence += 1
     sensor.read()
-    #print(key)
-    print(sensor.depth())
+
+    # to byte after to hex, and send
+    s = struct.pack(fmt, sequence, sensor.depth())
+    print("#" + s.hex() + "%")
+
+    time.sleep(0.01)
     """
     print(f"depth:{sensor.depth()}")
     print(f"pressure:{sensor.pressure()}")
     print(f"temperature:{sensor.temperature()}")
     print(f"altitude:{sensor.altitude()}")
     """
-    #led.value(stat)
-    time.sleep(0.05) 
-
