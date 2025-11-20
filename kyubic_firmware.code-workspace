@@ -1,0 +1,19 @@
+{
+	"folders": [
+		{
+			"path": "sensor_board_rp2040"
+		},
+		{
+			"path": "actuator_rp2024"
+		},
+		{
+			"name": "logic_distro_xiao",
+			"path": "logic_distro_xiao"
+		},
+		{
+			"name": "sensor_board_esp32",
+			"path": "sensor_board_esp32"
+		}
+	],
+	"settings": {}
+}
