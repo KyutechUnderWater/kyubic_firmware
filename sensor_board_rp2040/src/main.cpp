@@ -1,146 +1,196 @@
-// com5  2025/11/19
+/*
+ * RP2040 Firmware V15.1 (Non-Blocking Fix)
+ * Fixes:
+ * - Removed delay() and heavy logic from ISR.
+ * - Implemented flag-based processing in loop().
+ */
+
 #include <Arduino.h>
 #include <Wire.h>
+#include <Servo.h>
 #include <Adafruit_NeoPixel.h>
 
-// --- I2Cアドレス設定 (ESP32側の定義名と合わせてもOK) ---
-#define RP2040_ADDRESS 0x08 
+#define I2C_ADDR        0x08
 
-// --- NeoPixel 設定 (PDFピン14) ---
-#define NEOPIXEL_PIN 14
-Adafruit_NeoPixel statusPixel(1, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+// --- Pin Definitions ---
+#define PIN_SERVO_1     0
+#define PIN_SERVO_POWER 6    
+#define PIN_BAT_MEASURE 8    
+#define PIN_IMU_RESET   2    
+#define PIN_HEARTBEAT   3    
+#define PIN_BUZZER      7
 
-// --- バッテリーチェック用ピン設定 ---
-#define BATT_ENABLE_PIN 8     // バックアップボルテージシグナル
-#define BATT_LEAK_ADC_PIN 26  // 漏水センサ用バックアップ電池
-#define BATT_RTC_ADC_PIN  27  // RTC用バックアップ電池
+#define PIN_LED_EFFECT  14  
+#define NUM_LEDS_EFFECT 6
+#define PIN_LED_STATUS  15  
+#define NUM_LEDS_STATUS 35 
 
-// --- ブザー用ピン設定 ---
-#define BUZZER_PIN 7 
+#define PIN_BAT_LEAK_CHK 26 
+#define PIN_BAT_RTC_CHK  27 
+#define PIN_SIG_JETSON   10
+#define PIN_SIG_ACT      11
+#define PIN_SIG_LOGIC    12
+#define PIN_SIG_USB      13
 
-// --- 設定値 ---
-const float ADC_CONVERSION_FACTOR = 3.3 / 4095.0;
-const float BATT_CHANGE_THRESHOLD_V = 2.5; // 交換基準電圧
+// --- Limits ---
+#define SERVO_LIM_MIN 45
+#define SERVO_LIM_MAX 135
 
-// --- タイマー用変数 ---
-unsigned long lastLoopTime = 0;
-const unsigned long LOOP_INTERVAL_MS = 10; // 10ms間隔 (100Hz) で監視
+// --- Objects ---
+Adafruit_NeoPixel effectStrip(NUM_LEDS_EFFECT, PIN_LED_EFFECT, NEO_RGB + NEO_KHZ800);
+Adafruit_NeoPixel statusStrip(NUM_LEDS_STATUS, PIN_LED_STATUS, NEO_GRB + NEO_KHZ800);
+Servo tiltServo;
 
-// --- フラグ ---
-volatile bool buzzerShouldBeOn = false; // I2C割り込みで操作されるフラグ
+// --- Volatile Data (Shared between ISR and Loop) ---
+volatile bool g_buzzerActive = false;
+volatile bool g_quietMode = false;
 
-//ステータス保存用 (0=正常, 1=異常)
-volatile uint8_t systemStatus = 0;
+volatile bool g_flagImuReset = false;
+volatile bool g_flagServoUpdate = false;
+volatile int32_t g_targetServoVal = 90;
 
-// ＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝
-// --- 関数定義 ---
-// ＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝
+// Status Cache for I2C Read
+volatile byte g_statusCache = 0;
 
-// 起動時にバックアップ電池の電圧をチェックする関数
-void checkBatteryStatus() {
-  Serial.println("Checking backup batteries...");
-  pinMode(BATT_ENABLE_PIN, OUTPUT);
+// Prototypes
+void receiveEvent(int howMany);
+void requestEvent();
 
-  // 1. 計測回路ON
-  digitalWrite(BATT_ENABLE_PIN, HIGH);
-  delay(10); // ADC安定待ち (setup内なのでdelayでOK)
-
-  // 2. 電圧読み取り
-  int adcLeak = analogRead(BATT_LEAK_ADC_PIN);
-  int adcRTC = analogRead(BATT_RTC_ADC_PIN);
-  Serial.println(adcLeak);
-  Serial.println(adcRTC);
-  // 3. 計測回路OFF (必須)
-  digitalWrite(BATT_ENABLE_PIN, LOW); 
-
-  // 4. 電圧変換
-  float voltageLeak = adcLeak * ADC_CONVERSION_FACTOR;
-  float voltageRTC = adcRTC * ADC_CONVERSION_FACTOR;
-
-  Serial.print("  [BATT] Leak: "); Serial.print(voltageLeak); Serial.println(" V");
-  Serial.print("  [BATT] RTC:  "); Serial.print(voltageRTC); Serial.println(" V");
-
-  // 5. 判定とフラグ作成 (ビット演算)
-  systemStatus = 0; // まずリセット
-
-  // ビット0: リーク用電池 (1 = 異常)
-  if (voltageLeak < BATT_CHANGE_THRESHOLD_V) {
-    systemStatus |= 0x01; // 00000001 を足す
-    Serial.println("  [BATT] Leak Battery LOW!");
-  }
-
-  // ビット1: RTC用電池 (1 = 異常)
-  if (voltageRTC < BATT_CHANGE_THRESHOLD_V) {
-    systemStatus |= 0x02; // 00000010 を足す
-    Serial.println("  [BATT] RTC Battery LOW!");
-  }
-
-  // LED表示 (どちらか一方でも異常なら赤)
-  if (systemStatus > 0) {
-    statusPixel.setPixelColor(0, statusPixel.Color(255, 0, 0)); // 赤
-  } else {
-    Serial.println("  [BATT] All Batteries OK.");
-    statusPixel.setPixelColor(0, statusPixel.Color(0, 255, 0)); // 緑
-  }
-  statusPixel.show();
-}
-
-//ESPからリクエスト来た時に呼ばれる関数
-void requestEvent() {
-  // ステータスバイトを送信 (0=OK, 1=BattLow)
-  Wire.write(systemStatus); 
-}
-
-// I2Cデータ受信時の割り込み関数
-void receiveEvent(int howMany) {
-  while (Wire.available()) {
-    char c = Wire.read(); 
-    if (c == 'L') {      // 'L' = Leak (鳴らす)
-      buzzerShouldBeOn = true;
-    } else if (c == 'S') { // 'S' = Safe (止める)
-      buzzerShouldBeOn = false;
-    }
-  }
-}
-
-// ＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝
-// --- メイン処理 ---
-// ＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝
-
+// ==========================================================================
+// Setup
+// ==========================================================================
 void setup() {
-  Serial.begin(115200);
-  while (!Serial) delay(10);    //消す必要あり　　デバック用
-  // NeoPixel初期化
-  statusPixel.begin();
-  statusPixel.clear();
-  statusPixel.show();
-  
-  // ブザー
-  pinMode(BUZZER_PIN, OUTPUT);
-  digitalWrite(BUZZER_PIN, LOW);
+    analogReadResolution(12); 
 
-  // 起動時バッテリーチェック
-  checkBatteryStatus();
-  
-  // I2Cスレーブ開始 (ESP32と同じ定義名を使用)
-  Wire.begin(RP2040_ADDRESS);
-  Wire.onReceive(receiveEvent); // 受信
-  Wire.onRequest(requestEvent); // 送信
-  
-  Serial.println("RP2040 Ready.");
+    // Pin Modes
+    pinMode(PIN_SERVO_POWER, OUTPUT);
+    digitalWrite(PIN_SERVO_POWER, HIGH); 
+    delay(100);
+
+    tiltServo.attach(PIN_SERVO_1);
+    tiltServo.write(90); 
+
+    pinMode(PIN_BUZZER, OUTPUT);
+    pinMode(PIN_IMU_RESET, OUTPUT); digitalWrite(PIN_IMU_RESET, HIGH);
+    pinMode(PIN_HEARTBEAT, OUTPUT); 
+    pinMode(PIN_BAT_MEASURE, OUTPUT); 
+
+    pinMode(PIN_SIG_JETSON, INPUT);
+    pinMode(PIN_SIG_ACT, INPUT);
+    pinMode(PIN_SIG_LOGIC, INPUT);
+    pinMode(PIN_SIG_USB, INPUT);
+
+    // Init LED (One shot)
+    effectStrip.begin();
+    effectStrip.setBrightness(100);
+    for(int i=0; i<NUM_LEDS_EFFECT; i++) effectStrip.setPixelColor(i, 0x00FFFF);
+    effectStrip.show();
+
+    statusStrip.begin();
+    statusStrip.setBrightness(100);
+    for(int i=0; i<NUM_LEDS_STATUS; i++) statusStrip.setPixelColor(i, 0x00FFFF);
+    statusStrip.show();
+
+    // I2C Init (Must be last to ensure vars are ready)
+    Wire.begin(I2C_ADDR);
+    Wire.onReceive(receiveEvent);
+    Wire.onRequest(requestEvent);
 }
 
+// ==========================================================================
+// Main Loop (Process Flags Here)
+// ==========================================================================
 void loop() {
-  // ノンブロッキング・タイマー (10msごとに実行)
-  if (millis() - lastLoopTime > LOOP_INTERVAL_MS) {
-    lastLoopTime = millis();
-
-    /*// フラグの状態に合わせてブザーを制御
-    if (buzzerShouldBeOn) {
-      digitalWrite(BUZZER_PIN, HIGH);
-    } else {
-      digitalWrite(BUZZER_PIN, LOW);
+    // 1. Handle IMU Reset (Blocking delay is safe here)
+    if (g_flagImuReset) {
+        g_flagImuReset = false;
+        digitalWrite(PIN_IMU_RESET, LOW);
+        delay(100); 
+        digitalWrite(PIN_IMU_RESET, HIGH);
     }
-    //Serial.println("buzzer_test");*/
-  }
+
+    // 2. Handle Servo Update
+    if (g_flagServoUpdate) {
+        g_flagServoUpdate = false;
+        tiltServo.write(g_targetServoVal);
+    }
+
+    // 3. Update Status Cache (Periodically)
+    static unsigned long lastAdcTime = 0;
+    if (millis() - lastAdcTime > 100) {
+        lastAdcTime = millis();
+        
+        // Analog Reads take time, do them here
+        bool batLeakOk = (analogRead(PIN_BAT_LEAK_CHK) > 2000); 
+        bool batRtcOk  = (analogRead(PIN_BAT_RTC_CHK)  > 2000);
+
+        byte s = 0;
+        s |= (batLeakOk ? 1 : 0) << 0;
+        s |= (batRtcOk  ? 1 : 0) << 1;
+        s |= (digitalRead(PIN_SIG_JETSON) ? 1 : 0) << 2;
+        s |= (digitalRead(PIN_SIG_ACT) ? 1 : 0) << 3;
+        s |= (digitalRead(PIN_SIG_LOGIC) ? 1 : 0) << 4;
+        s |= (digitalRead(PIN_SIG_USB) ? 1 : 0) << 5;
+        
+        // Atomic update
+        noInterrupts();
+        g_statusCache = s;
+        interrupts();
+    }
+
+    // 4. Heartbeat & Buzzer
+    digitalWrite(PIN_HEARTBEAT, (millis() / 500) % 2);
+
+    if (g_buzzerActive && !g_quietMode) {
+        digitalWrite(PIN_BUZZER, (millis() / 200) % 2);
+    } else {
+        digitalWrite(PIN_BUZZER, LOW);
+    }
+    
+    // Small delay to yield
+    delay(1);
+}
+
+// ==========================================================================
+// I2C ISRs (Keep Extremely Short!)
+// ==========================================================================
+
+// Rx: ESP32 -> RP2040
+void receiveEvent(int howMany) {
+    if (Wire.available()) {
+        char cmd = Wire.read();
+        int32_t val = 0;
+        if (Wire.available() >= 4) {
+            val |= ((int32_t)Wire.read() << 24);
+            val |= ((int32_t)Wire.read() << 16);
+            val |= ((int32_t)Wire.read() << 8);
+            val |= (int32_t)Wire.read();
+        }
+
+        switch(cmd) {
+            case 'T': // Servo
+                g_targetServoVal = constrain(val, SERVO_LIM_MIN, SERVO_LIM_MAX);
+                g_flagServoUpdate = true;
+                break;
+            case 'I': // IMU Reset
+                if(val == 1) g_flagImuReset = true;
+                break;
+            case 'B': // Buzzer
+                g_buzzerActive = (val > 0);
+                if(val > 0) g_quietMode = false;
+                break;
+            case 'Q': // Quiet
+                g_quietMode = true;
+                break;
+        }
+        
+        // Flush any garbage
+        while(Wire.available()) Wire.read();
+    }
+}
+
+// Tx: RP2040 -> ESP32
+void requestEvent() {
+    // Just return the pre-calculated byte
+    Wire.write(g_statusCache);
 }

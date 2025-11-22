@@ -1,0 +1,24 @@
+syntax = "proto3";
+package protolink__driver_msgs__Depth;
+
+message driver_msgs__Depth {
+message std_msgs__Header {
+message builtin_interfaces__Time {
+optional int32 sec = 1;
+optional uint32 nanosec = 2;
+}
+
+builtin_interfaces__Time stamp = 1;
+optional string frame_id = 2;
+}
+
+std_msgs__Header header = 1;
+message common_msgs__Status {
+optional uint32 id = 1;
+}
+
+common_msgs__Status status = 2;
+optional uint32 watertype = 3;
+optional float depth = 4;
+optional float temperature = 5;
+}
