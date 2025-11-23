@@ -1,5 +1,6 @@
 /*
   Thruster control with Nanopb (driver_msgs/Actuator)
+  Updated for specific proto definition and Serial safety check.
 */
 #include <Arduino.h>
 #include <Servo.h>
@@ -12,11 +13,12 @@
 // Nanopb headers
 #include "pb_encode.h"
 #include "pb_decode.h"
-// ※ .protoファイルから生成されたヘッダファイルのパスに合わせて変更が必要
+// ※ .protoファイルから生成されたヘッダファイルのパスに合わせて変更してください
 #include "proto/driver_msgs__Actuator.pb.h"
 
-// メッセージ型のエイリアス定義 (生成された構造体名に合わせる)
-using Actuator = protolink__driver_msgs__Actuator_driver_msgs__Actuator;
+// --- メッセージ型のエイリアス定義 ---
+// 生成される構造体名は環境によりますが、提示されたパッケージ名に基づき定義
+using ActuatorMsg = protolink__driver_msgs__Actuator_driver_msgs__Actuator;
 
 // --- グローバル変数定義 ---
 PacketSerial myPacketSerial;
@@ -34,6 +36,8 @@ const static uint16_t SERIAL_TIMEOUT = 1000;
 
 float thrust_value[THRUSTER_NUM] = { 0 };
 int thrust_pwm[THRUSTER_NUM];
+int led_pwm[2] = { 1500, 1500 }; // LED制御用 (Right, Left)
+
 unsigned long last_time = 0;
 bool is_update = false;
 
@@ -41,10 +45,14 @@ bool is_update = false;
 std::array<Servo, 6> escs;
 std::array<Servo, 2> leds;
 
+Adafruit_NeoPixel onboardLED(1, ON_BOARD_LED, NEO_GRB + NEO_KHZ800);
+
 // --- 関数プロトタイプ ---
 void onboard_led(uint8_t r, uint8_t g, uint8_t b);
 void GetWritePWM(float *thrust);
+void WriteLEDs();
 void LimitThrust();
+void StopAllActuators(); // 全停止用
 void onPacketReceived(const uint8_t* buffer, size_t size);
 
 template<std::size_t N>
@@ -60,86 +68,121 @@ void write_servos(std::array<Servo, N>& servos, int ms){
 // --- パケット受信コールバック ---
 void onPacketReceived(const uint8_t* buffer, size_t size)
 {
-  Actuator message = protolink__driver_msgs__Actuator_driver_msgs__Actuator_init_zero;
+  ActuatorMsg message = protolink__driver_msgs__Actuator_driver_msgs__Actuator_init_zero;
   pb_istream_t stream = pb_istream_from_buffer(buffer, size);
   
-  // デコード実行
-  // Actuatorメッセージのフィールド構造（message.thrust 等）に合わせて適宜修正が必要
   bool status = pb_decode(&stream, protolink__driver_msgs__Actuator_driver_msgs__Actuator_fields, &message);
 
   if (status)
   {
-    // 受信データの反映
-    // ※proto定義で配列がfixed_sizeかcallbackかによりアクセス方法が異なる点に注意
-    // ここでは thrust_value への代入を行う想定
-    
-    // 例: message.effort (double配列) が存在する場合
-    // nanopbのoptionsでmax_countを設定している場合は直接配列アクセス可能
-    /* for (int i = 0; i < THRUSTER_NUM; i++) {
-       if (i < message.effort_count) {
-           thrust_value[i] = (float)message.effort[i];
-       }
+    // --- Thrusters (driver_msgs__Thruster) ---
+    // has_thrustersフラグがあれば値を読み込む
+    if (message.has_thrusters) {
+      // optionalフィールドのため、has_thrXを確認するのが確実ですが、
+      // ここでは簡易的に値が存在すれば更新、なければ0とみなすか、前の値を保持するか
+      // Nanopbのinit_zeroで0初期化されているため、値が入っていればそのまま使います
+      
+      // 提示された定義に基づき各スラスター値を取得
+      thrust_value[0] = message.thrusters.thr1;
+      thrust_value[1] = message.thrusters.thr2;
+      thrust_value[2] = message.thrusters.thr3;
+      thrust_value[3] = message.thrusters.thr4;
+      thrust_value[4] = message.thrusters.thr5;
+      thrust_value[5] = message.thrusters.thr6;
     }
-    */
 
-    // 仮実装: 受信成功フラグのみ
+    // --- LEDs (driver_msgs__LED) ---
+    if (message.has_leds) {
+       // LED制御値 (int32) を取得。
+       // ここではPWM値(1100-1900等)が直接送られてくると想定して格納
+       led_pwm[0] = message.leds.right; // leds[0] -> Right
+       led_pwm[1] = message.leds.left;  // leds[1] -> Left
+    }
+
     is_update = true;
     last_time = millis();
     onboard_led(0, 0, 25); // 正常受信: 青
   }
   else
   {
-    onboard_led(25, 0, 0); // デコードエラー: 赤
+    // デコードエラー
+    onboard_led(25, 0, 0); // 赤
   }
 }
 
 // --- セットアップ ---
 void setup() {
-  // PacketSerial初期化 (Serial.beginも内部で行われるが明示的に指定も可)
-  myPacketSerial.begin(115200);
+  onboardLED.begin();
+
+  // 変更: Serialを開始し、PacketSerialにStreamをセット
+  Serial.begin(115200);
+  myPacketSerial.setStream(&Serial);
   myPacketSerial.setPacketHandler(&onPacketReceived);
   
   onboard_led(0, 25, 0); // 起動: 緑
 
   init_servos(escs, ESC_SIGS);
   init_servos(leds, LEDS);
-  write_servos(escs, 1500);
-  write_servos(leds, 1500);
+  
+  StopAllActuators(); // 初期化時は停止
 
   pinMode(RELAY_SIG, OUTPUT);
   pinMode(SIG_SPARE, OUTPUT);
   for (auto pin : SIGS) pinMode(pin, OUTPUT);
 
-  delay(7000);
+  delay(4000);
   onboard_led(0, 0, 25); // 待機: 青
+  delay(1000);
 }
 
 // --- メインループ ---
 void loop() {
-  // パケット受信処理の更新
+  // 追加: Serial接続確認
+  // USB接続が切れた場合など、Serialが無効なら停止させる
+  if (!Serial) {
+    StopAllActuators();
+    onboard_led(25, 0, 0); // エラー: 赤
+    return; // 通信処理をスキップ
+  }
+
+  // パケット受信処理
   myPacketSerial.update();
 
   // タイムアウト監視
   if (SERIAL_TIMEOUT < (millis() - last_time)) {
-    for (int i = 0; i < THRUSTER_NUM; i++) {
-      thrust_value[i] = 0;
-    }
-    is_update = true;
+    StopAllActuators();
+    is_update = true; // PWM書き込みを実行させるため
     onboard_led(25, 25, 0); // タイムアウト: 黄
   }
 
-  // 推力更新
+  // アクチュエータ更新
   if (is_update) {
-    LimitThrust();
-    GetWritePWM(thrust_value);
+    // LimitThrust();             // 推力制限
+    GetWritePWM(thrust_value); // 推力 -> PWM変換と書き込み
+    WriteLEDs();               // LED PWM書き込み
     is_update = false;
   }
 }
 
 // --- ヘルパー関数 ---
+
+// 全アクチュエータを安全な値（停止/中立）にする
+void StopAllActuators() {
+  for (int i = 0; i < THRUSTER_NUM; i++) {
+    thrust_value[i] = 0.0f;
+  }
+  led_pwm[0] = 1500;
+  led_pwm[1] = 1500;
+}
+
+void WriteLEDs() {
+  // LEDへのPWM出力
+  // 必要に応じて範囲制限などをここに追加してください
+  leds[0].writeMicroseconds(led_pwm[0]);
+  leds[1].writeMicroseconds(led_pwm[1]);
+}
+
 void onboard_led(uint8_t r, uint8_t g, uint8_t b){
-  Adafruit_NeoPixel onboardLED(1, ON_BOARD_LED, NEO_GRB + NEO_KHZ800);
-  onboardLED.begin();
   onboardLED.setPixelColor(0, onboardLED.Color(r, g, b));
   onboardLED.show();
 }
@@ -147,7 +190,7 @@ void onboard_led(uint8_t r, uint8_t g, uint8_t b){
 void GetWritePWM(float *thrust) {
   for (int i = 0; i < THRUSTER_NUM; i++) {
     float x = thrust[i];
-    if (i < 3) { // CCW
+    if (i < 3) { // CCW (0, 1, 2)
       if (-0.4 < x && x < 0.4) {
         thrust_pwm[i] = 1500;
       } else if (x > 0) {
@@ -155,7 +198,7 @@ void GetWritePWM(float *thrust) {
       } else {
         thrust_pwm[i] = round(CCW_NEGATIVE[0] * pow(x, 3) + CCW_NEGATIVE[1] * pow(x, 2) + CCW_NEGATIVE[2] * x + CCW_NEGATIVE[3]);
       }
-    } else { // CW
+    } else { // CW (3, 4, 5)
       if (-0.4 < x && x < 0.4) {
         thrust_pwm[i] = 1500;
       } else if (x > 0) {
