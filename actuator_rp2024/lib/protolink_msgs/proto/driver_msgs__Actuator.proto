@@ -1,0 +1,69 @@
+syntax = "proto3";
+package protolink__driver_msgs__Actuator;
+
+message driver_msgs__Actuator {
+message std_msgs__Header {
+message builtin_interfaces__Time {
+optional int32 sec = 1;
+optional uint32 nanosec = 2;
+}
+
+builtin_interfaces__Time stamp = 1;
+optional string frame_id = 2;
+}
+
+std_msgs__Header header = 1;
+message common_msgs__Status {
+optional uint32 id = 1;
+}
+
+common_msgs__Status status = 2;
+message driver_msgs__Thruster {
+message std_msgs__Header {
+message builtin_interfaces__Time {
+optional int32 sec = 1;
+optional uint32 nanosec = 2;
+}
+
+builtin_interfaces__Time stamp = 1;
+optional string frame_id = 2;
+}
+
+std_msgs__Header header = 1;
+message common_msgs__Status {
+optional uint32 id = 1;
+}
+
+common_msgs__Status status = 2;
+optional float thr1 = 3;
+optional float thr2 = 4;
+optional float thr3 = 5;
+optional float thr4 = 6;
+optional float thr5 = 7;
+optional float thr6 = 8;
+}
+
+driver_msgs__Thruster thrusters = 3;
+message driver_msgs__LED {
+message std_msgs__Header {
+message builtin_interfaces__Time {
+optional int32 sec = 1;
+optional uint32 nanosec = 2;
+}
+
+builtin_interfaces__Time stamp = 1;
+optional string frame_id = 2;
+}
+
+std_msgs__Header header = 1;
+message common_msgs__Status {
+optional uint32 id = 1;
+}
+
+common_msgs__Status status = 2;
+optional int32 right = 3;
+optional int32 left = 4;
+}
+
+driver_msgs__LED leds = 4;
+}
