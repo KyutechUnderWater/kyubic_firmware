@@ -15,14 +15,14 @@ const uint8_t ESC_SIG_6 = 7;
 
 // Fron LED
 const uint8_t  LED1 = 8;
-const uint8_t  LED2 = 9;
+const uint8_t  LED2 = 11;
 
 // Relay Signal
 const uint8_t RELAY_SIG = 28;
 
 // GPIO Extentions
 const uint8_t SIG11 = 10;
-const uint8_t SIG12 = 11;
+const uint8_t SIG12 = 9;
 const uint8_t SIG13 = 12;
 const uint8_t SIG14 = 13;
 const uint8_t SIG21 = 14;

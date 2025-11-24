@@ -36,7 +36,7 @@ const static uint16_t SERIAL_TIMEOUT = 1000;
 
 float thrust_value[THRUSTER_NUM] = { 0 };
 int thrust_pwm[THRUSTER_NUM];
-int led_pwm[2] = { 1500, 1500 }; // LED制御用 (Right, Left)
+int led_pwm[2] = { 1100, 1100 }; // LED制御用 (Right, Left)
 
 unsigned long last_time = 0;
 bool is_update = false;
@@ -45,10 +45,8 @@ bool is_update = false;
 std::array<Servo, 6> escs;
 std::array<Servo, 2> leds;
 
-Adafruit_NeoPixel onboardLED(1, ON_BOARD_LED, NEO_GRB + NEO_KHZ800);
-
 // --- 関数プロトタイプ ---
-void onboard_led(uint8_t r, uint8_t g, uint8_t b);
+// void onboard_led(uint8_t r, uint8_t g, uint8_t b);
 void GetWritePWM(float *thrust);
 void WriteLEDs();
 void LimitThrust();
@@ -101,25 +99,21 @@ void onPacketReceived(const uint8_t* buffer, size_t size)
 
     is_update = true;
     last_time = millis();
-    onboard_led(0, 0, 25); // 正常受信: 青
   }
   else
   {
     // デコードエラー
-    onboard_led(25, 0, 0); // 赤
   }
 }
 
 // --- セットアップ ---
 void setup() {
-  onboardLED.begin();
+  // onboardLED.begin();
 
   // 変更: Serialを開始し、PacketSerialにStreamをセット
   Serial.begin(115200);
   myPacketSerial.setStream(&Serial);
   myPacketSerial.setPacketHandler(&onPacketReceived);
-  
-  onboard_led(0, 25, 0); // 起動: 緑
 
   init_servos(escs, ESC_SIGS);
   init_servos(leds, LEDS);
@@ -130,8 +124,6 @@ void setup() {
   pinMode(SIG_SPARE, OUTPUT);
   for (auto pin : SIGS) pinMode(pin, OUTPUT);
 
-  delay(4000);
-  onboard_led(0, 0, 25); // 待機: 青
   delay(1000);
 }
 
@@ -141,7 +133,6 @@ void loop() {
   // USB接続が切れた場合など、Serialが無効なら停止させる
   if (!Serial) {
     StopAllActuators();
-    onboard_led(25, 0, 0); // エラー: 赤
     return; // 通信処理をスキップ
   }
 
@@ -152,7 +143,6 @@ void loop() {
   if (SERIAL_TIMEOUT < (millis() - last_time)) {
     StopAllActuators();
     is_update = true; // PWM書き込みを実行させるため
-    onboard_led(25, 25, 0); // タイムアウト: 黄
   }
 
   // アクチュエータ更新
@@ -171,8 +161,10 @@ void StopAllActuators() {
   for (int i = 0; i < THRUSTER_NUM; i++) {
     thrust_value[i] = 0.0f;
   }
-  led_pwm[0] = 1500;
-  led_pwm[1] = 1500;
+  led_pwm[0] = 1100;
+  led_pwm[1] = 1100;
+  GetWritePWM(thrust_value);
+  WriteLEDs();
 }
 
 void WriteLEDs() {
@@ -180,11 +172,6 @@ void WriteLEDs() {
   // 必要に応じて範囲制限などをここに追加してください
   leds[0].writeMicroseconds(led_pwm[0]);
   leds[1].writeMicroseconds(led_pwm[1]);
-}
-
-void onboard_led(uint8_t r, uint8_t g, uint8_t b){
-  onboardLED.setPixelColor(0, onboardLED.Color(r, g, b));
-  onboardLED.show();
 }
 
 void GetWritePWM(float *thrust) {
