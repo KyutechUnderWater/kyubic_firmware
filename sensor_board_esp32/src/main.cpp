@@ -1,13 +1,8 @@
 /*
- * ESP32 Firmware V28.2 (Depth 20Hz / ARP Fix / Time Broadcast / Leak Periodic / IMU-ZED-WaterType)
- * Target: ESP32-D1-Mini + W5500
- *
- * 追加要素:
- * - ROS/PC → ESP32 経由の IMU リセット (9004) を PIN13 (EX_IO_1) で実行
- * - ZED 電源制御 (90010) を PIN14 (EX_IO_2) で実行
- * - 水質 (water_type, 9002) を受信し、MS5837 の fluidDensity に反映
- * - log_current / act_current (9011) を RP2040 へ UART で送信
- * - 必要であれば Depth メッセージに water_type を載せて PC へフィードバック
+ * ESP32 Firmware V30.4 (Advisor Refined - Compile Fix Final)
+ * - GNSS: Force Save & Reset for PPS Polarity
+ * - OLED: Added Fix Type (2D/3D) to expose Altitude reliability
+ * - FIXED: Missing scope brackets in switch case (PAGE_GNSS)
  */
 
 #include <Arduino.h>
@@ -50,34 +45,23 @@ typedef protolink__driver_msgs__SystemStatus_driver_msgs__SystemStatus Msg_Syste
 typedef protolink__driver_msgs__PowerState_driver_msgs__PowerState Msg_Power;
 
 // --- Pin Definitions ---
-// EX_IO_3 / EX_IO_4 → 深度センサ I2C (A 系)
-#define PIN_I2C_A_SDA 32 // EX_IO_3 (AD_IO)
-#define PIN_I2C_A_SCL 33 // EX_IO_4 (AD_IO)
-
-// I2C_B: GNSS / OLED / BME など
-#define PIN_I2C_B_SDA 21 // SDA
-#define PIN_I2C_B_SCL 22 // SCL
-
-// RP2040 UART
-#define PIN_RP_TX 27 // EX_IO_6 (UART: TX - RP)
-#define PIN_RP_RX 34 // EX_IO_5 (UART: RX - RP)
-
-// GNSS UART
-#define PIN_GNSS_RX 16 // GNSS_TXO
-#define PIN_GNSS_TX 17 // GNSS_RXI
-
-// W5500
-#define W5500_CS 26   // W5500_CS
-#define W5500_RST 25  // W5500_RST
-#define W5500_SCLK 18 // W5500_SCLK
-#define W5500_MISO 19 // W5500_MISO
-#define W5500_MOSI 23 // W5500_MOSI
-
-// その他 IO
-#define PIN_LEAK 39      // Leak_Sig (D_I)
-#define PIN_IMU_RESET 13 // EX_IO_1 (AD_IO, IMU_Reset)
-#define PIN_ZED_POWER 14 // EX_IO_2 (AD_IO, ZED_Pow)
-#define PIN_PPS_IN 35    // GNSS_PPS (D_I)
+#define PIN_I2C_A_SDA 32
+#define PIN_I2C_A_SCL 33
+#define PIN_I2C_B_SDA 21
+#define PIN_I2C_B_SCL 22
+#define PIN_RP_TX 27
+#define PIN_RP_RX 34
+#define PIN_GNSS_RX 16
+#define PIN_GNSS_TX 17
+#define W5500_CS 26
+#define W5500_RST 25
+#define W5500_SCLK 18
+#define W5500_MISO 19
+#define W5500_MOSI 23
+#define PIN_LEAK 39
+#define PIN_IMU_RESET 13
+#define PIN_ZED_POWER 14
+#define PIN_PPS_IN 35
 
 #define ADDR_GNSS 0x42
 #define ADDR_OLED 0x3C
@@ -85,8 +69,8 @@ typedef protolink__driver_msgs__PowerState_driver_msgs__PowerState Msg_Power;
 // --- Network Config ---
 byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 IPAddress myIp(192, 168, 9, 5);
-IPAddress pcIp(192, 168, 9, 100);    // メインPC
-IPAddress bcastIp(192, 168, 9, 255); // サブネットブロードキャスト
+IPAddress pcIp(192, 168, 9, 100);
+IPAddress bcastIp(192, 168, 9, 255);
 
 // --- UDP Ports ---
 #define PORT_TX_BATTERY 9000
@@ -97,19 +81,19 @@ IPAddress bcastIp(192, 168, 9, 255); // サブネットブロードキャスト
 #define PORT_TX_TIME 9008
 #define PORT_TX_SIGNAL 9012
 
-#define PORT_RX_BUZZER 9001    // Bool buzzer / buzzer_stop
-#define PORT_RX_DEPTH_CFG 9002 // Bool water_type (1=海水, 0=真水)
-#define PORT_RX_IMU 9004       // Bool imu_reset
-#define PORT_RX_RGB 9006       // Int32 rgb
-#define PORT_RX_SERVO 9009     // Int32 servo
-#define PORT_RX_ZED 9010       // Bool zed_power
-#define PORT_RX_POWER 9011     // Float32 log/act voltage & current
+#define PORT_RX_BUZZER 9001
+#define PORT_RX_DEPTH_CFG 9002
+#define PORT_RX_IMU 9004
+#define PORT_RX_RGB 9006
+#define PORT_RX_SERVO 9009
+#define PORT_RX_ZED 9010
+#define PORT_RX_POWER 9011
 
 // --- Objects ---
 EthernetUDP udpSender;
 EthernetUDP udpRxBuzzer, udpRxDepthCfg, udpRxImu, udpRxRgb, udpRxServo, udpRxZed, udpRxPower;
 
-// --- Helper: Force Bus Reset ---
+// --- High Speed MS5837 (Condensed) ---
 void forceBusReset(int sda, int scl)
 {
     pinMode(sda, INPUT_PULLUP);
@@ -130,14 +114,13 @@ void forceBusReset(int sda, int scl)
     delayMicroseconds(10);
 }
 
-// --- High Speed MS5837 ---
 class RobustMS5837
 {
 private:
     uint16_t C[7];
     TwoWire *wirePort;
     uint8_t addr;
-    float fluidDensity = 1029.0; // 初期値: 海水
+    float fluidDensity = 1029.0;
     void osDelay(int ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
     void recoverBus()
     {
@@ -154,9 +137,7 @@ private:
     uint16_t read16()
     {
         wirePort->requestFrom(addr, (uint8_t)2);
-        if (wirePort->available() >= 2)
-            return (wirePort->read() << 8) | wirePort->read();
-        return 0;
+        return (wirePort->available() >= 2) ? (wirePort->read() << 8) | wirePort->read() : 0;
     }
     uint32_t read24()
     {
@@ -204,7 +185,6 @@ public:
         uint32_t D1 = read24();
         if (D1 == 0)
             return false;
-
         if (!writeCmd(0x58))
             return false;
         osDelay(11);
@@ -213,16 +193,13 @@ public:
         uint32_t D2 = read24();
         if (D2 == 0)
             return false;
-
         int32_t dT = D2 - (uint32_t)C[5] * 256;
         int32_t TEMP = 2000 + ((int64_t)dT * C[6]) / 8388608;
         int64_t OFF = (int64_t)C[2] * 65536 + ((int64_t)C[4] * dT) / 128;
         int64_t SENS = (int64_t)C[1] * 32768 + ((int64_t)C[3] * dT) / 256;
         int32_t P = (int32_t)((D1 * SENS / 2097152 - OFF) / 8192);
-
         tempVal = TEMP / 100.0f;
-        float pressure = P / 10.0f;
-        depthVal = (pressure - 1013.25f) / (9.80665f * fluidDensity / 100.0f);
+        depthVal = (P / 10.0f - 1013.25f) / (9.80665f * fluidDensity / 100.0f);
         return true;
     }
 };
@@ -244,16 +221,29 @@ bool g_bmeFound = false;
 bool g_rp2040Alive = false;
 bool g_leakDetected = false;
 volatile bool g_ethLinkStatus = false;
+bool g_isSeawater = true;
+
+unsigned long g_lastLeakTxMs = 0;
+
+// --- Battery Management Variables ---
+const float CAP_LOGIC_AH = 18.0f; // 4S
+const float CAP_ACT_AH = 6.0f;    // 6S
 
 float g_logVoltage = 0.0f;
 float g_actVoltage = 0.0f;
 float g_logCurrent = 0.0f;
 float g_actCurrent = 0.0f;
 
-// water_type: true=海水, false=真水
-bool g_isSeawater = true;
+float g_logConsumedAh = 0.0f;
+float g_actConsumedAh = 0.0f;
+unsigned long g_lastPowerUpdateMs = 0;
+bool g_batteryInitialized = false;
 
-unsigned long g_lastLeakTxMs = 0; // Leak 定期送信用
+// --- Display Cache Variables ---
+int32_t g_dispServo = 90;
+int32_t g_dispRgb = -1;
+bool g_dispZedPower = false;
+bool g_dispImuReset = false;
 
 struct DepthData
 {
@@ -275,13 +265,16 @@ struct RP2040State
 
 enum OledPage
 {
-    PAGE_STATUS,
-    PAGE_ENV,
+    PAGE_SYSTEM,
+    PAGE_BATTERY,
+    PAGE_INSIDE,
+    PAGE_DEPTH,
+    PAGE_SIGNALS,
     PAGE_GNSS,
-    PAGE_POWER,
+    PAGE_RX_INFO,
     PAGE_MAX
 };
-int currentPage = PAGE_STATUS;
+int currentPage = PAGE_SYSTEM;
 unsigned long lastPageChange = 0;
 
 // --- Prototypes ---
@@ -296,14 +289,12 @@ void sendLeakUDP(bool leak);
 void drawGuiHeader(const char *title);
 void drawGuiFooter();
 void drawCorner(int x, int y, int w, int h);
-void drawSegBar(int x, int y, int w, int h, float val, float maxVal);
+void drawSegBar(int x, int y, int w, int h, float val, float maxVal, bool usePercent);
+float estimateConsumedAhFromVoltage(float voltage, float capacityAh);
 
 void setup()
 {
     Serial.begin(115200);
-    delay(500);
-    Serial.println("\n=== BOOT V28.2 (IMU/ZED/WATER_TYPE) ===");
-
     esp_task_wdt_init(30, true);
 
     wire1Mutex = xSemaphoreCreateMutex();
@@ -314,23 +305,20 @@ void setup()
     pinMode(PIN_LEAK, INPUT);
     pinMode(PIN_PPS_IN, INPUT);
     pinMode(PIN_IMU_RESET, OUTPUT);
-    digitalWrite(PIN_IMU_RESET, HIGH); // 常時 HIGH
+    digitalWrite(PIN_IMU_RESET, HIGH);
     pinMode(PIN_ZED_POWER, OUTPUT);
-    digitalWrite(PIN_ZED_POWER, LOW); // ZED 初期は OFF
+    digitalWrite(PIN_ZED_POWER, LOW);
 
     Serial1.begin(115200, SERIAL_8N1, PIN_RP_RX, PIN_RP_TX);
     Serial2.begin(38400, SERIAL_8N1, PIN_GNSS_RX, PIN_GNSS_TX);
 
-    // I2C_B: GNSS / OLED / BME
     forceBusReset(PIN_I2C_B_SDA, PIN_I2C_B_SCL);
     Wire1.begin(PIN_I2C_B_SDA, PIN_I2C_B_SCL);
     Wire1.setClock(400000);
     Wire1.setTimeOut(50);
 
-    // SPI / W5500
     SPI.begin(W5500_SCLK, W5500_MISO, W5500_MOSI, W5500_CS);
     SPI.setFrequency(20000000);
-
     pinMode(W5500_RST, OUTPUT);
     digitalWrite(W5500_RST, LOW);
     delay(10);
@@ -339,7 +327,7 @@ void setup()
 
     Ethernet.init(W5500_CS);
     Ethernet.begin(mac, myIp);
-    Ethernet.setRetransmissionTimeout(300); // 30ms
+    Ethernet.setRetransmissionTimeout(300);
     Ethernet.setRetransmissionCount(0);
 
     udpSender.begin(12345);
@@ -365,22 +353,43 @@ void setup()
         display.setTextSize(1);
         display.setTextColor(SH110X_WHITE);
         display.setCursor(0, 0);
-        display.println("V28.2 SYSTEM OK");
+        display.println("V30.4 SYSTEM OK");
         display.display();
     }
 
+    // GNSS Init & Explicit PPS (TP1) Configuration
     {
         SFE_UBLOX_GNSS configGNSS;
         if (configGNSS.begin(Wire1, ADDR_GNSS))
         {
-            configGNSS.setVal32(0x20050030, 1); // PPS 1Hz 等の設定
+            // 1. Disable first to ensure clean state
+            configGNSS.setVal8(0x10050007, 0); // TP1_ENA = 0
+
+            // 2. Set params
+            configGNSS.setVal32(0x40050024, 1);      // FREQ_TP1 = 1Hz
+            configGNSS.setVal32(0x40050004, 100000); // LEN_TP1 = 100ms
+            configGNSS.setVal8(0x20050030, 1);       // TIMEGRID = GPS
+            configGNSS.setVal8(0x10050008, 1);       // USE_LOCKED = 1
+            configGNSS.setVal8(0x1005000a, 1);       // ALIGN_TO_TOW = 1
+            configGNSS.setVal8(0x10050006, 1);       // POL_TP1 = 1 (Falling/Inverted)
+
+            // 3. Enable
+            configGNSS.setVal8(0x10050007, 1); // TP1_ENA = 1
+
+            // 4. Force Save to BBR/Flash
             configGNSS.saveConfiguration();
+
+            // 5. Optional: Software Reset to apply new pin mux if needed (Hot Start)
+            // configGNSS.softwareResetGNSSHot();
         }
     }
     if (myGNSS.begin(Serial2))
+    {
         g_gnssFound = true;
+    }
 
-    // Depth / NetRx / Main タスク起動
+    g_lastPowerUpdateMs = millis();
+
     xTaskCreatePinnedToCore(Task_Depth, "Depth", 8192, NULL, 10, NULL, 0);
     xTaskCreatePinnedToCore(Task_NetRx, "Rx", 8192, NULL, 3, NULL, 1);
     xTaskCreatePinnedToCore(Task_Main, "Main", 8192, NULL, 2, NULL, 1);
@@ -388,44 +397,27 @@ void setup()
 
 void loop() { vTaskDelete(NULL); }
 
-// ==========================================================================
-// Task: Depth (Core 0, Priority 10)
-// ==========================================================================
 void Task_Depth(void *pvParameters)
 {
     Wire.begin(PIN_I2C_A_SDA, PIN_I2C_A_SCL);
     Wire.setClock(400000);
     Wire.setTimeOut(5);
-
-    // 初期 fluidDensity を water_type に合わせる
     depthSensor.setFluidDensity(g_isSeawater ? 1029.0f : 997.0f);
-
     while (!depthSensor.init())
         vTaskDelay(pdMS_TO_TICKS(1000));
-
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const TickType_t xFrequency = pdMS_TO_TICKS(50);
     uint8_t txBuf[128];
-
     for (;;)
     {
         bool ok = depthSensor.read();
-
         if (xSemaphoreTake(depthMutex, 5) == pdTRUE)
         {
-            if (ok)
-            {
-                sharedDepth.depth = depthSensor.depthVal;
-                sharedDepth.temp = depthSensor.tempVal;
-                sharedDepth.ok = true;
-            }
-            else
-            {
-                sharedDepth.ok = false;
-            }
+            sharedDepth.depth = ok ? depthSensor.depthVal : 0.0f;
+            sharedDepth.temp = ok ? depthSensor.tempVal : 0.0f;
+            sharedDepth.ok = ok;
             xSemaphoreGive(depthMutex);
         }
-
         if (ok)
         {
             Msg_Depth msg = protolink__driver_msgs__Depth_driver_msgs__Depth_init_zero;
@@ -433,12 +425,8 @@ void Task_Depth(void *pvParameters)
             msg.depth = depthSensor.depthVal;
             msg.has_temperature = true;
             msg.temperature = depthSensor.tempVal;
-
-            // ★ water_type を Depth メッセージに載せる場合は .proto で bool water_type を追加しておくこと
-            //   例: bool water_type = 3;  // true=海水, false=真水
             msg.has_watertype = true;
             msg.watertype = g_isSeawater;
-
             pb_ostream_t stream = pb_ostream_from_buffer(txBuf, sizeof(txBuf));
             if (pb_encode(&stream, protolink__driver_msgs__Depth_driver_msgs__Depth_fields, &msg))
             {
@@ -455,9 +443,6 @@ void Task_Depth(void *pvParameters)
     }
 }
 
-// ==========================================================================
-// Task: Net Rx (Core 1, Priority 3)
-// ==========================================================================
 void Task_NetRx(void *pvParameters)
 {
     uint8_t rxBuf[256];
@@ -467,7 +452,6 @@ void Task_NetRx(void *pvParameters)
     {
         vTaskDelay(pdMS_TO_TICKS(10));
 
-        // 500ms ごとにリンク状態を確認
         if (millis() - lastLinkCheck > 500)
         {
             if (xSemaphoreTake(ethMutex, 10) == pdTRUE)
@@ -478,7 +462,7 @@ void Task_NetRx(void *pvParameters)
             }
         }
 
-        // --- Power: log/act Voltage & Current (PORT_RX_POWER) ---
+        // Power
         if (xSemaphoreTake(ethMutex, 5) == pdTRUE)
         {
             int packetSize = udpRxPower.parsePacket();
@@ -489,6 +473,12 @@ void Task_NetRx(void *pvParameters)
                 Msg_Power msg = protolink__driver_msgs__PowerState_driver_msgs__PowerState_init_zero;
                 if (pb_decode(&s, protolink__driver_msgs__PowerState_driver_msgs__PowerState_fields, &msg))
                 {
+                    unsigned long now = millis();
+                    float dt_sec = (now - g_lastPowerUpdateMs) / 1000.0f;
+                    if (dt_sec > 1.0f)
+                        dt_sec = 0.0f;
+                    g_lastPowerUpdateMs = now;
+
                     if (msg.has_log_voltage)
                     {
                         g_logVoltage = msg.log_voltage;
@@ -499,15 +489,23 @@ void Task_NetRx(void *pvParameters)
                         g_actVoltage = msg.act_voltage;
                         sendRP2040Uart('A', (int32_t)(g_actVoltage * 1000));
                     }
+                    if (!g_batteryInitialized && msg.has_log_voltage && msg.has_act_voltage && g_logVoltage > 5.0f)
+                    {
+                        g_logConsumedAh = estimateConsumedAhFromVoltage(g_logVoltage, CAP_LOGIC_AH);
+                        g_actConsumedAh = estimateConsumedAhFromVoltage(g_actVoltage, CAP_ACT_AH);
+                        g_batteryInitialized = true;
+                    }
                     if (msg.has_log_current)
                     {
-                        g_logCurrent = msg.log_current;
-                        sendRP2040Uart('v', (int32_t)(g_logCurrent * 1000)); // log current (mA 相当)
+                        g_logCurrent = msg.log_current / 200.0f;
+                        g_logConsumedAh += g_logCurrent * (dt_sec / 3600.0f);
+                        sendRP2040Uart('v', (int32_t)(g_logCurrent * 1000));
                     }
                     if (msg.has_act_current)
                     {
-                        g_actCurrent = msg.act_current;
-                        sendRP2040Uart('a', (int32_t)(g_actCurrent * 1000)); // act current
+                        g_actCurrent = msg.act_current / 200.0f;
+                        g_actConsumedAh += g_actCurrent * (dt_sec / 3600.0f);
+                        sendRP2040Uart('a', (int32_t)(g_actCurrent * 1000));
                     }
                 }
             }
@@ -515,7 +513,7 @@ void Task_NetRx(void *pvParameters)
         }
         taskYIELD();
 
-        // --- Servo / RGB / Buzzer ---
+        // Servo
         if (xSemaphoreTake(ethMutex, 5) == pdTRUE)
         {
             if (udpRxServo.parsePacket())
@@ -524,17 +522,81 @@ void Task_NetRx(void *pvParameters)
                 pb_istream_t s = pb_istream_from_buffer(rxBuf, len);
                 Msg_Int32 msg = protolink__driver_msgs__Int32Stamped_driver_msgs__Int32Stamped_init_zero;
                 if (pb_decode(&s, protolink__driver_msgs__Int32Stamped_driver_msgs__Int32Stamped_fields, &msg))
+                {
                     sendRP2040Uart('T', msg.data);
+                    g_dispServo = msg.data;
+                }
             }
-            else if (udpRxRgb.parsePacket())
+            xSemaphoreGive(ethMutex);
+        }
+
+        // RGB
+        if (xSemaphoreTake(ethMutex, 5) == pdTRUE)
+        {
+            if (udpRxRgb.parsePacket())
             {
                 int len = udpRxRgb.read(rxBuf, sizeof(rxBuf));
                 pb_istream_t s = pb_istream_from_buffer(rxBuf, len);
                 Msg_Int32 msg = protolink__driver_msgs__Int32Stamped_driver_msgs__Int32Stamped_init_zero;
                 if (pb_decode(&s, protolink__driver_msgs__Int32Stamped_driver_msgs__Int32Stamped_fields, &msg))
+                {
                     sendRP2040Uart('R', msg.data);
+                    g_dispRgb = msg.data;
+                }
             }
-            else if (udpRxBuzzer.parsePacket())
+            xSemaphoreGive(ethMutex);
+        }
+
+        // ZED
+        if (xSemaphoreTake(ethMutex, 5) == pdTRUE)
+        {
+            if (udpRxZed.parsePacket())
+            {
+                int len = udpRxZed.read(rxBuf, sizeof(rxBuf));
+                pb_istream_t s = pb_istream_from_buffer(rxBuf, len);
+                Msg_Bool msg = protolink__driver_msgs__BoolStamped_driver_msgs__BoolStamped_init_zero;
+                if (pb_decode(&s, protolink__driver_msgs__BoolStamped_driver_msgs__BoolStamped_fields, &msg))
+                {
+                    if (msg.has_data)
+                    {
+                        digitalWrite(PIN_ZED_POWER, msg.data ? HIGH : LOW);
+                        g_dispZedPower = msg.data;
+                    }
+                }
+            }
+            xSemaphoreGive(ethMutex);
+        }
+
+        // IMU
+        if (xSemaphoreTake(ethMutex, 5) == pdTRUE)
+        {
+            if (udpRxImu.parsePacket())
+            {
+                int len = udpRxImu.read(rxBuf, sizeof(rxBuf));
+                pb_istream_t s = pb_istream_from_buffer(rxBuf, len);
+                Msg_Bool msg = protolink__driver_msgs__BoolStamped_driver_msgs__BoolStamped_init_zero;
+                if (pb_decode(&s, protolink__driver_msgs__BoolStamped_driver_msgs__BoolStamped_fields, &msg))
+                {
+                    if (msg.has_data && msg.data)
+                    {
+                        digitalWrite(PIN_IMU_RESET, LOW);
+                        vTaskDelay(pdMS_TO_TICKS(10));
+                        digitalWrite(PIN_IMU_RESET, HIGH);
+                        g_dispImuReset = true;
+                    }
+                    else
+                    {
+                        g_dispImuReset = false;
+                    }
+                }
+            }
+            xSemaphoreGive(ethMutex);
+        }
+
+        // Buzzer
+        if (xSemaphoreTake(ethMutex, 5) == pdTRUE)
+        {
+            if (udpRxBuzzer.parsePacket())
             {
                 int len = udpRxBuzzer.read(rxBuf, sizeof(rxBuf));
                 pb_istream_t s = pb_istream_from_buffer(rxBuf, len);
@@ -550,56 +612,10 @@ void Task_NetRx(void *pvParameters)
             xSemaphoreGive(ethMutex);
         }
 
-        // --- IMU Reset (PORT_RX_IMU, BoolStamped) ---
+        // Depth Config (Water Type)
         if (xSemaphoreTake(ethMutex, 5) == pdTRUE)
         {
-            int packetSize = udpRxImu.parsePacket();
-            if (packetSize)
-            {
-                int len = udpRxImu.read(rxBuf, sizeof(rxBuf));
-                pb_istream_t s = pb_istream_from_buffer(rxBuf, len);
-                Msg_Bool msg = protolink__driver_msgs__BoolStamped_driver_msgs__BoolStamped_init_zero;
-                if (pb_decode(&s, protolink__driver_msgs__BoolStamped_driver_msgs__BoolStamped_fields, &msg))
-                {
-                    if (msg.has_data && msg.data)
-                    {
-                        // IMU Reset: LOW → 少し待って → HIGH（常時 HIGH）
-                        digitalWrite(PIN_IMU_RESET, LOW);
-                        vTaskDelay(pdMS_TO_TICKS(10));
-                        digitalWrite(PIN_IMU_RESET, HIGH);
-                    }
-                }
-            }
-            xSemaphoreGive(ethMutex);
-        }
-
-        // --- ZED Power (PORT_RX_ZED, BoolStamped) ---
-        if (xSemaphoreTake(ethMutex, 5) == pdTRUE)
-        {
-            int packetSize = udpRxZed.parsePacket();
-            if (packetSize)
-            {
-                int len = udpRxZed.read(rxBuf, sizeof(rxBuf));
-                pb_istream_t s = pb_istream_from_buffer(rxBuf, len);
-                Msg_Bool msg = protolink__driver_msgs__BoolStamped_driver_msgs__BoolStamped_init_zero;
-                if (pb_decode(&s, protolink__driver_msgs__BoolStamped_driver_msgs__BoolStamped_fields, &msg))
-                {
-                    if (msg.has_data)
-                    {
-                        digitalWrite(PIN_ZED_POWER, msg.data ? HIGH : LOW);
-                    }
-                }
-            }
-            xSemaphoreGive(ethMutex);
-        }
-
-        // --- Depth Config / water_type (PORT_RX_DEPTH_CFG, BoolStamped) ---
-        //      data == true  -> 海水 (1029 kg/m^3)
-        //      data == false -> 真水 (約 997 kg/m^3)
-        if (xSemaphoreTake(ethMutex, 5) == pdTRUE)
-        {
-            int packetSize = udpRxDepthCfg.parsePacket();
-            if (packetSize)
+            if (udpRxDepthCfg.parsePacket())
             {
                 int len = udpRxDepthCfg.read(rxBuf, sizeof(rxBuf));
                 pb_istream_t s = pb_istream_from_buffer(rxBuf, len);
@@ -608,9 +624,8 @@ void Task_NetRx(void *pvParameters)
                 {
                     if (msg.has_data)
                     {
-                        g_isSeawater = msg.data; // 1=海水, 0=真水
-                        float density = g_isSeawater ? 1029.0f : 997.0f;
-                        depthSensor.setFluidDensity(density);
+                        g_isSeawater = msg.data;
+                        depthSensor.setFluidDensity(g_isSeawater ? 1029.0f : 997.0f);
                     }
                 }
             }
@@ -619,9 +634,6 @@ void Task_NetRx(void *pvParameters)
     }
 }
 
-// ==========================================================================
-// Task: Main (Core 1, Priority 2)
-// ==========================================================================
 void Task_Main(void *pvParameters)
 {
     esp_task_wdt_add(NULL);
@@ -633,12 +645,14 @@ void Task_Main(void *pvParameters)
         esp_task_wdt_reset();
         checkRP2040Incoming();
 
-        if (millis() - rp2040State.lastUpdate < 1500)
-            g_rp2040Alive = true;
-        else
-            g_rp2040Alive = false;
+        if (g_gnssFound)
+        {
+            myGNSS.checkUblox();
+            myGNSS.checkUblox();
+        }
 
-        // Leak 検出（変化時に即送信）
+        g_rp2040Alive = (millis() - rp2040State.lastUpdate < 1500);
+
         bool currentLeak = (digitalRead(PIN_LEAK) == HIGH);
         if (currentLeak != g_leakDetected)
         {
@@ -646,30 +660,25 @@ void Task_Main(void *pvParameters)
             sendRP2040Uart(g_leakDetected ? 'L' : 'N', 0);
             sendLeakUDP(currentLeak);
         }
-
-        // Leak の 1Hz 定期送信
         if (millis() - g_lastLeakTxMs > 1000)
-        {
             sendLeakUDP(g_leakDetected);
-        }
 
         if (xSemaphoreTake(wire1Mutex, 50) == pdTRUE)
         {
-            int slot = count % 10;
+            int slot = count % 5;
 
             if (slot == 0)
             {
-                updateOLED();
+                if (count % 10 == 0)
+                    updateOLED();
                 esp_task_wdt_reset();
             }
             else if (slot == 1)
             {
                 handleTimeSync();
-                if (g_gnssFound)
-                    myGNSS.checkUblox();
             }
             else if (slot == 2)
-            { // Env
+            { // Env Tx
                 if (g_bmeFound)
                 {
                     Msg_Environment msg = protolink__driver_msgs__Environment_driver_msgs__Environment_init_zero;
@@ -721,7 +730,7 @@ void Task_Main(void *pvParameters)
                 }
             }
             else if (slot == 4)
-            { // Battery & Signal
+            { // Battery/Signal Tx
                 if (g_rp2040Alive)
                 {
                     Msg_BtnBatt bMsg = protolink__driver_msgs__ButtonBatteryState_driver_msgs__ButtonBatteryState_init_zero;
@@ -775,13 +784,10 @@ void Task_Main(void *pvParameters)
             lastPageChange = millis();
         }
         count++;
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
-// ==========================================================================
-// Helpers
-// ==========================================================================
 void sendLeakUDP(bool leak)
 {
     uint8_t buf[64];
@@ -802,22 +808,21 @@ void sendLeakUDP(bool leak)
     }
 }
 
-// 時刻はブロードキャスト (192.168.9.255:9008)
 void handleTimeSync()
 {
     static unsigned long lastSync = 0;
     uint8_t buf[128];
-
     if (g_gnssFound && myGNSS.getSIV() >= 4 && myGNSS.getTimeValid())
     {
         if (millis() - lastSync > 60000)
         {
-            rtc.adjust(DateTime(myGNSS.getYear(), myGNSS.getMonth(), myGNSS.getDay(),
-                                myGNSS.getHour(), myGNSS.getMinute(), myGNSS.getSecond()));
+            DateTime utc = DateTime(myGNSS.getYear(), myGNSS.getMonth(), myGNSS.getDay(),
+                                    myGNSS.getHour(), myGNSS.getMinute(), myGNSS.getSecond());
+            DateTime jst = utc + TimeSpan(0, 9, 0, 0);
+            rtc.adjust(jst);
             lastSync = millis();
         }
     }
-
     DateTime now = rtc.now();
     Msg_RtcTime tMsg = protolink__driver_msgs__RtcTime_driver_msgs__RtcTime_init_zero;
     tMsg.has_year = true;
@@ -868,7 +873,7 @@ void checkRP2040Incoming()
         {
             if (Serial1.available() >= 2)
             {
-                Serial1.read(); // '<'
+                Serial1.read();
                 if (Serial1.available())
                 {
                     byte s = Serial1.read();
@@ -886,13 +891,30 @@ void checkRP2040Incoming()
                 return;
         }
         else
-        {
             Serial1.read();
-        }
     }
 }
 
-// --- OLED 描画 ---
+float estimateConsumedAhFromVoltage(float voltage, float capacityAh)
+{
+    int cells = (voltage > 18.0f) ? 6 : 4;
+    float cellV = voltage / (float)cells;
+    float pct = 0.0f;
+    if (cellV >= 4.20f)
+        pct = 1.0f;
+    else if (cellV >= 4.00f)
+        pct = 0.85f + (cellV - 4.00f) * (0.15f / 0.20f);
+    else if (cellV >= 3.75f)
+        pct = 0.50f + (cellV - 3.75f) * (0.35f / 0.25f);
+    else if (cellV >= 3.60f)
+        pct = 0.20f + (cellV - 3.60f) * (0.30f / 0.15f);
+    else if (cellV >= 3.30f)
+        pct = 0.00f + (cellV - 3.30f) * (0.20f / 0.30f);
+    else
+        pct = 0.0f;
+    return capacityAh * (1.0f - pct);
+}
+
 void drawGuiHeader(const char *title)
 {
     display.fillRect(0, 0, 128, 10, SH110X_WHITE);
@@ -908,7 +930,6 @@ void drawGuiHeader(const char *title)
         display.setTextSize(2);
         display.setCursor(30, 25);
         display.print("! LEAK !");
-        return;
     }
 }
 
@@ -918,11 +939,24 @@ void drawGuiFooter()
     display.drawLine(0, 53, 128, 53, SH110X_WHITE);
     display.setCursor(2, y);
     display.print(g_rp2040Alive ? "RP:OK" : "RP:NO");
-    display.setCursor(45, y);
+    display.setCursor(40, y);
     display.print(g_ethLinkStatus ? "NET:OK" : "NET:NO");
-    display.setCursor(90, y);
-    display.print("SAT:");
-    display.print(myGNSS.getSIV());
+
+    display.setCursor(85, y);
+    float remAh = CAP_LOGIC_AH - g_logConsumedAh;
+    if (remAh < 0)
+        remAh = 0;
+    if (g_logCurrent > 0.1f)
+    {
+        float hours = remAh / g_logCurrent;
+        if (hours > 99.9)
+            hours = 99.9;
+        display.printf("L:%.1fh", hours);
+    }
+    else
+    {
+        display.print("L:---");
+    }
 }
 
 void drawCorner(int x, int y, int w, int h)
@@ -934,17 +968,23 @@ void drawCorner(int x, int y, int w, int h)
     display.drawLine(x + w - 1, y, x + w - 1, y + len, SH110X_WHITE);
     display.drawLine(x, y + h - 1, x + len, y + h - 1, SH110X_WHITE);
     display.drawLine(x, y + h - 1, x, y + h - 1 - len, SH110X_WHITE);
-    display.drawLine(x + w - 1, y + h - 1, x + w - 1 - len, y + h - 1, SH110X_WHITE);
+    display.drawLine(x + w - 1, y + h - 1, x + w - 1, y + h - 1 - len, SH110X_WHITE);
     display.drawLine(x + w - 1, y + h - 1, x + w - 1, y + h - 1 - len, SH110X_WHITE);
 }
 
-void drawSegBar(int x, int y, int w, int h, float val, float maxVal)
+void drawSegBar(int x, int y, int w, int h, float val, float maxVal, bool usePercent)
 {
     display.drawRect(x, y, w, h, SH110X_WHITE);
     int segs = 10;
-    int active = (int)((val / maxVal) * segs);
+    int active;
+    if (usePercent)
+        active = (int)((val / 100.0f) * segs);
+    else
+        active = (int)((val / maxVal) * segs);
     if (active > segs)
         active = segs;
+    if (active < 0)
+        active = 0;
     int sw = (w - 4) / segs;
     for (int i = 0; i < active; i++)
     {
@@ -972,71 +1012,160 @@ void updateOLED()
         drawCorner(0, 12, 128, 40);
         switch (currentPage)
         {
-        case PAGE_STATUS:
+        case PAGE_SYSTEM: // 1. System
         {
-            drawGuiHeader("STATUS");
-            display.setCursor(5, 18);
+            drawGuiHeader("SYSTEM");
+            display.setCursor(5, 16);
             DateTime now = rtc.now();
-            display.printf("%02d:%02d:%02d", now.hour(), now.minute(), now.second());
-            display.setCursor(5, 30);
-            display.print("DEPTH:");
-            float d = 0.0f;
+            display.printf("DATE: %02d/%02d/%02d", now.year() % 100, now.month(), now.day());
+            display.setCursor(5, 26);
+            display.printf("TIME: %02d:%02d:%02d", now.hour(), now.minute(), now.second());
+            display.setCursor(5, 36);
+            unsigned long upSec = millis() / 1000;
+            unsigned long upH = upSec / 3600;
+            unsigned long upM = (upSec % 3600) / 60;
+            unsigned long upS = upSec % 60;
+            display.printf("UP  : %02lu:%02lu:%02lu", upH, upM, upS);
+            break;
+        }
+
+        case PAGE_BATTERY: // 2. Battery (High Density)
+        {
+            drawGuiHeader("BATTERY");
+            int lCells = (g_logVoltage > 18.0) ? 6 : 4;
+            int aCells = (g_actVoltage > 18.0) ? 6 : 4;
+            float lPct = (CAP_LOGIC_AH > 0) ? (1.0f - (g_logConsumedAh / CAP_LOGIC_AH)) * 100.0f : 0;
+            float aPct = (CAP_ACT_AH > 0) ? (1.0f - (g_actConsumedAh / CAP_ACT_AH)) * 100.0f : 0;
+            if (lPct < 0)
+                lPct = 0;
+            if (aPct < 0)
+                aPct = 0;
+
+            // L: 16.8V 1.5A 80%
+            display.setCursor(2, 14);
+            display.printf("L:%4.1fV %4.1fA %3.0f%%", g_logVoltage, g_logCurrent, lPct);
+            drawSegBar(2, 22, 124, 4, lPct, 100.0f, true);
+
+            // A: 25.2V 0.5A 50%
+            display.setCursor(2, 30);
+            display.printf("A:%4.1fV %4.1fA %3.0f%%", g_actVoltage, g_actCurrent, aPct);
+            drawSegBar(2, 38, 124, 4, aPct, 100.0f, true);
+
+            display.setCursor(2, 44);
+            float remAh = CAP_LOGIC_AH - g_logConsumedAh;
+            if (remAh < 0)
+                remAh = 0;
+            if (g_logCurrent > 0.1f)
+            {
+                float h = remAh / g_logCurrent;
+                int hh = (int)h;
+                int mm = (int)((h - hh) * 60);
+                display.printf("Time:%02d:%02d(3.3V/C)", hh, mm);
+            }
+            else
+            {
+                display.print("Time:--:--(3.3V/C)");
+            }
+            break;
+        }
+
+        case PAGE_INSIDE: // 3. Hull Sensors
+            drawGuiHeader("INSIDE");
+            if (g_bmeFound)
+            {
+                display.setCursor(5, 16);
+                display.printf("Temp: %.1f C", bmeSensor.readTempC());
+                display.setCursor(5, 26);
+                display.printf("Pres: %.1f hPa", bmeSensor.readFloatPressure() / 100.0f);
+                display.setCursor(5, 36);
+                display.printf("Humi: %.1f %%", bmeSensor.readFloatHumidity());
+            }
+            else
+            {
+                display.setCursor(5, 26);
+                display.print("No Sensor");
+            }
+            break;
+
+        case PAGE_DEPTH: // 4. Depth Sensor
+        {
+            drawGuiHeader("DEPTH");
+            float d = 0.0f, t = 0.0f;
             if (xSemaphoreTake(depthMutex, 10) == pdTRUE)
             {
                 d = sharedDepth.depth;
-                xSemaphoreGive(depthMutex);
-            }
-            display.setTextSize(2);
-            display.setCursor(50, 26);
-            display.print(d, 1);
-            display.setTextSize(1);
-            display.print("m");
-            break;
-        }
-        case PAGE_ENV:
-        {
-            drawGuiHeader("ENVIRON");
-            float t = 0.0f;
-            if (xSemaphoreTake(depthMutex, 10) == pdTRUE)
-            {
                 t = sharedDepth.temp;
                 xSemaphoreGive(depthMutex);
             }
-            display.setCursor(5, 18);
-            display.printf("W-Temp: %.1f C", t);
-            if (g_bmeFound)
+            display.setCursor(5, 16);
+            display.printf("Type: %s", g_isSeawater ? "Sea" : "Fresh");
+            display.setCursor(5, 26);
+            display.printf("Dep : %.2f m", d);
+            display.setCursor(5, 36);
+            display.printf("Temp: %.1f C", t);
+            break;
+        }
+
+        case PAGE_SIGNALS: // 5. Signals (RP2040)
+            drawGuiHeader("SIGNALS");
+            display.setCursor(5, 16);
+            display.printf("Jetson: %d", rp2040State.sig_jetson);
+            display.setCursor(64, 16);
+            display.printf("L-Rly : %d", rp2040State.sig_logic_rly);
+            display.setCursor(5, 26);
+            display.printf("ActPow: %d", rp2040State.sig_act_pow);
+            display.setCursor(64, 26);
+            display.printf("A-Rly : %d", rp2040State.sig_act_rly);
+            display.setCursor(5, 36);
+            display.printf("PC-Pow: %d", rp2040State.sig_pc_pow);
+            break;
+
+        case PAGE_GNSS: // 6. GNSS
+        {
+            drawGuiHeader("GNSS");
+            display.setCursor(2, 16);
+            display.printf("Lat: %.6f", myGNSS.getLatitude() / 10000000.0);
+            display.setCursor(2, 26);
+            display.printf("Lon: %.6f", myGNSS.getLongitude() / 10000000.0);
+
+            // Fix Type Logic for Altitude Reliability
+            byte fixType = myGNSS.getFixType(); // 0=No, 1=DR, 2=2D, 3=3D...
+            display.setCursor(2, 36);
+            if (fixType >= 3)
             {
-                display.setCursor(5, 30);
-                display.printf("Air-T : %.1f C", bmeSensor.readTempC());
-                display.setCursor(5, 40);
-                display.printf("Air-H : %.0f %%", bmeSensor.readFloatHumidity());
+                display.printf("Alt: %.1f m (3D)", myGNSS.getAltitude() / 1000.0);
+            }
+            else if (fixType == 2)
+            {
+                display.print("Alt: 2D Fix (Unrel)");
+            }
+            else
+            {
+                display.print("Alt: No Fix");
             }
             break;
         }
-        case PAGE_GNSS:
-        {
-            drawGuiHeader("GNSS");
-            display.setCursor(5, 18);
-            display.print("LAT:");
-            display.print(myGNSS.getLatitude() / 10000000.0, 5);
-            display.setCursor(5, 28);
-            display.print("LON:");
-            display.print(myGNSS.getLongitude() / 10000000.0, 5);
-            break;
-        }
-        case PAGE_POWER:
-        {
-            drawGuiHeader("POWER");
+
+        case PAGE_RX_INFO: // 7. RX Info
+            drawGuiHeader("RX INFO");
             display.setCursor(5, 16);
-            display.printf("L:%.1fV", g_logVoltage);
-            drawSegBar(60, 16, 60, 6, g_logVoltage, 16.8f);
+            display.printf("Servo: %d", g_dispServo);
             display.setCursor(5, 26);
-            display.printf("A:%.1fV", g_actVoltage);
-            drawSegBar(60, 26, 60, 6, g_actVoltage, 25.2f);
-            display.setCursor(5, 38);
-            display.printf("W:%s", g_isSeawater ? "Sea" : "Fresh");
+            if (g_dispRgb == -1)
+            {
+                display.print("RGB  : [-]");
+            }
+            else
+            {
+                // Assuming packed RGB (0xRRGGBB)
+                int r = (g_dispRgb >> 16) & 0xFF;
+                int g = (g_dispRgb >> 8) & 0xFF;
+                int b = g_dispRgb & 0xFF;
+                display.printf("R:%d G:%d B:%d", r, g, b);
+            }
+            display.setCursor(5, 36);
+            display.printf("ZED:%d  IMU-R:%d", g_dispZedPower, g_dispImuReset);
             break;
-        }
         }
         drawGuiFooter();
     }
