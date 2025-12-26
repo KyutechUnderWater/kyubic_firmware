@@ -40,9 +40,9 @@ using SystemSwitchMsg = protolink__driver_msgs__SystemSwitch_driver_msgs__System
 // 出力ピン (SystemStatusのフィールドに対応)
 const int PIN_JETSON = 0; // OUT1
 const int PIN_DVL    = 1; // OUT2
-const int PIN_EX1    = 2; // OUT3
-const int PIN_EX2    = 3; // OUT4
-const int PIN_COM    = 6; // OUT5
+const int PIN_COM    = 2; // OUT3
+const int PIN_EX1    = 3; // OUT4
+const int PIN_EX8    = 6; // OUT5
 const int PIN_ACT_SW = 7; // Act_SW
 const int PIN_5V_SW  = 9; // 5V_SW (メッセージには含まれていないが制御用として維持)
 
@@ -53,6 +53,9 @@ const int PIN_LOG_TEMP = 10; // Logi_TEMP (DS18B20)
 // --- I2Cアドレス ---
 const uint8_t INA_LOG_ADDR = 0x40; // LogPow (INA219)
 const uint8_t INA_ACT_ADDR = 0x45; // ActPow (INA219)
+
+// --- シャント抵抗値による補正係数
+const uint8_t SHUNT_COEFFICIENT = 200;
 
 // --- オブジェクト生成 ---
 Adafruit_INA219 ina_log(INA_LOG_ADDR);
@@ -97,18 +100,18 @@ void setup() {
   pinMode(PIN_JETSON, OUTPUT);
   pinMode(PIN_DVL, OUTPUT);
   pinMode(PIN_EX1, OUTPUT);
-  pinMode(PIN_EX2, OUTPUT);
+  pinMode(PIN_EX8, OUTPUT);
   pinMode(PIN_COM, OUTPUT);
   pinMode(PIN_ACT_SW, OUTPUT);
   pinMode(PIN_5V_SW, OUTPUT);
 
   // 初期状態: すべてHIGH (ON) または安全側に設定
   digitalWrite(PIN_JETSON, HIGH);
-  digitalWrite(PIN_DVL, HIGH);
-  digitalWrite(PIN_EX1, HIGH);
-  digitalWrite(PIN_EX2, HIGH);
+  digitalWrite(PIN_DVL, LOW);
+  digitalWrite(PIN_EX1, LOW);
+  digitalWrite(PIN_EX8, LOW);
   digitalWrite(PIN_COM, HIGH);
-  digitalWrite(PIN_ACT_SW, HIGH);
+  digitalWrite(PIN_ACT_SW, LOW);
   digitalWrite(PIN_5V_SW, HIGH);
 
   // LED
@@ -168,7 +171,7 @@ void onPacketReceived(const uint8_t* buffer, size_t size) {
     if (message.has_dvl)      updateOutputPin(PIN_DVL, message.dvl);
     if (message.has_com)      updateOutputPin(PIN_COM, message.com);
     if (message.has_ex1)      updateOutputPin(PIN_EX1, message.ex1);
-    if (message.has_ex2)      updateOutputPin(PIN_EX2, message.ex2);
+    if (message.has_ex8)      updateOutputPin(PIN_EX8, message.ex8);
     if (message.has_actuator) updateOutputPin(PIN_ACT_SW, message.actuator);
     
     // Ack等はPacketSerialなので基本不要だが、必要ならここで返信
@@ -188,15 +191,18 @@ void readAndPublishData() {
   // 1. センサデータ取得
   float log_busVoltage = ina_log.getBusVoltage_V();
   float log_shuntVoltage = ina_log.getShuntVoltage_mV();
-  float log_current = ina_log.getCurrent_mA();
-  float log_power = ina_log.getPower_mW();
+  float log_current = ina_log.getCurrent_mA() / SHUNT_COEFFICIENT;
+  float log_power = ina_log.getPower_mW() / SHUNT_COEFFICIENT;
   float log_voltage = log_busVoltage + (log_shuntVoltage / 1000.0);
 
   float act_busVoltage = ina_act.getBusVoltage_V();
   float act_shuntVoltage = ina_act.getShuntVoltage_mV();
-  float act_current = ina_act.getCurrent_mA();
-  float act_power = ina_act.getPower_mW();
+  float act_current = ina_act.getCurrent_mA() / SHUNT_COEFFICIENT;
+  float act_power = ina_act.getPower_mW() / SHUNT_COEFFICIENT;
   float act_voltage = act_busVoltage + (act_shuntVoltage / 1000.0);
+
+  if (log_voltage > 30) log_voltage = 1.0f / 0.0f;
+  if (act_voltage > 30) act_voltage = 1.0f / 0.0f;
 
   // 温度取得 (リクエスト済みの値を取得)
   float log_temp = sensor_log.getTempCByIndex(0);
