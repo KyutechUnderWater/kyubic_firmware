@@ -1,8 +1,8 @@
 /*
- * ESP32 Firmware V30.4 (Advisor Refined - Compile Fix Final)
- * - GNSS: Force Save & Reset for PPS Polarity
- * - OLED: Added Fix Type (2D/3D) to expose Altitude reliability
- * - FIXED: Missing scope brackets in switch case (PAGE_GNSS)
+ * ESP32 Firmware V30.6 (Advisor Refined - Auto Recovery)
+ * - CRITICAL UPDATE: Added auto-recovery logic to Task_Depth.
+ * If sensor read fails for >1 second, it triggers full bus reset and re-initialization.
+ * - FIX: Previous V30.5 fixes (Wire.end usage, WDT, Priority) are preserved.
  */
 
 #include <Arduino.h>
@@ -93,7 +93,8 @@ IPAddress bcastIp(192, 168, 9, 255);
 EthernetUDP udpSender;
 EthernetUDP udpRxBuzzer, udpRxDepthCfg, udpRxImu, udpRxRgb, udpRxServo, udpRxZed, udpRxPower;
 
-// --- High Speed MS5837 (Condensed) ---
+// --- High Speed MS5837 (Stabilized) ---
+// I2Cバスを手動でトグルしてスタックしたスレーブを解放する
 void forceBusReset(int sda, int scl)
 {
     pinMode(sda, INPUT_PULLUP);
@@ -120,25 +121,39 @@ private:
     uint16_t C[7];
     TwoWire *wirePort;
     uint8_t addr;
+    int pin_sda;
+    int pin_scl;
     float fluidDensity = 1029.0;
+
     void osDelay(int ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
+
+    // CRITICAL FIX: ドライバを停止してから手動操作を行う
     void recoverBus()
     {
-        forceBusReset(PIN_I2C_A_SDA, PIN_I2C_A_SCL);
-        wirePort->begin(PIN_I2C_A_SDA, PIN_I2C_A_SCL);
+        // 1. ESP32のI2Cドライバを停止し、ピンを解放する
+        wirePort->end(); 
+        
+        // 2. 手動でクロックを叩いてバスをクリアする
+        forceBusReset(pin_sda, pin_scl);
+        
+        // 3. ドライバを再開する
+        wirePort->begin(pin_sda, pin_scl);
         wirePort->setClock(400000);
     }
+
     bool writeCmd(uint8_t cmd)
     {
         wirePort->beginTransmission(addr);
         wirePort->write(cmd);
         return (wirePort->endTransmission() == 0);
     }
+
     uint16_t read16()
     {
         wirePort->requestFrom(addr, (uint8_t)2);
         return (wirePort->available() >= 2) ? (wirePort->read() << 8) | wirePort->read() : 0;
     }
+
     uint32_t read24()
     {
         if (wirePort->requestFrom(addr, (uint8_t)3) == 3)
@@ -154,15 +169,21 @@ private:
 public:
     float depthVal = 0.0;
     float tempVal = 0.0;
-    RobustMS5837(TwoWire *w, uint8_t a = 0x76)
+
+    // コンストラクタでピン番号を受け取るように変更
+    RobustMS5837(TwoWire *w, int sda, int scl, uint8_t a = 0x76)
     {
         wirePort = w;
+        pin_sda = sda;
+        pin_scl = scl;
         addr = a;
     }
+
     void setFluidDensity(float density) { fluidDensity = density; }
+
     bool init()
     {
-        recoverBus();
+        recoverBus(); // 安全に呼び出せるようになった
         if (!writeCmd(0x1E))
             return false;
         osDelay(20);
@@ -175,6 +196,7 @@ public:
         }
         return (C[1] > 0);
     }
+
     bool read()
     {
         if (!writeCmd(0x48))
@@ -204,7 +226,8 @@ public:
     }
 };
 
-RobustMS5837 depthSensor(&Wire, 0x76);
+// インスタンス化時にピン番号を指定
+RobustMS5837 depthSensor(&Wire, PIN_I2C_A_SDA, PIN_I2C_A_SCL, 0x76);
 BME280 bmeSensor;
 RTC_DS3231 rtc;
 SFE_UBLOX_GNSS myGNSS;
@@ -251,6 +274,7 @@ struct DepthData
     float temp;
     bool ok;
 } sharedDepth;
+
 struct RP2040State
 {
     bool bat_leak;
@@ -295,7 +319,9 @@ float estimateConsumedAhFromVoltage(float voltage, float capacityAh);
 void setup()
 {
     Serial.begin(115200);
-    esp_task_wdt_init(30, true);
+    
+    // WDTの初期化時間を少し長めに設定 (起動時の遅延対策)
+    esp_task_wdt_init(60, true);
 
     wire1Mutex = xSemaphoreCreateMutex();
     depthMutex = xSemaphoreCreateMutex();
@@ -312,7 +338,16 @@ void setup()
     Serial1.begin(115200, SERIAL_8N1, PIN_RP_RX, PIN_RP_TX);
     Serial2.begin(38400, SERIAL_8N1, PIN_GNSS_RX, PIN_GNSS_TX);
 
+    // 起動時のバス浄化：両方のバスを一度リセットする
+    Wire.end(); 
+    Wire1.end();
+    forceBusReset(PIN_I2C_A_SDA, PIN_I2C_A_SCL);
     forceBusReset(PIN_I2C_B_SDA, PIN_I2C_B_SCL);
+
+    // FIX: setup内でWireを開始し、状態を確定させる
+    Wire.begin(PIN_I2C_A_SDA, PIN_I2C_A_SCL);
+    Wire.setClock(400000);
+
     Wire1.begin(PIN_I2C_B_SDA, PIN_I2C_B_SCL);
     Wire1.setClock(400000);
     Wire1.setTimeOut(50);
@@ -353,7 +388,7 @@ void setup()
         display.setTextSize(1);
         display.setTextColor(SH110X_WHITE);
         display.setCursor(0, 0);
-        display.println("V30.4 SYSTEM OK");
+        display.println("V30.6 SYSTEM OK");
         display.display();
     }
 
@@ -378,9 +413,6 @@ void setup()
 
             // 4. Force Save to BBR/Flash
             configGNSS.saveConfiguration();
-
-            // 5. Optional: Software Reset to apply new pin mux if needed (Hot Start)
-            // configGNSS.softwareResetGNSSHot();
         }
     }
     if (myGNSS.begin(Serial2))
@@ -390,7 +422,8 @@ void setup()
 
     g_lastPowerUpdateMs = millis();
 
-    xTaskCreatePinnedToCore(Task_Depth, "Depth", 8192, NULL, 10, NULL, 0);
+    // FIX: Depthタスクの優先度を 10 から 5 に下げる
+    xTaskCreatePinnedToCore(Task_Depth, "Depth", 8192, NULL, 5, NULL, 0);
     xTaskCreatePinnedToCore(Task_NetRx, "Rx", 8192, NULL, 3, NULL, 1);
     xTaskCreatePinnedToCore(Task_Main, "Main", 8192, NULL, 2, NULL, 1);
 }
@@ -399,18 +432,61 @@ void loop() { vTaskDelete(NULL); }
 
 void Task_Depth(void *pvParameters)
 {
-    Wire.begin(PIN_I2C_A_SDA, PIN_I2C_A_SCL);
-    Wire.setClock(400000);
-    Wire.setTimeOut(5);
+    // FIX: WDT監視を追加。フリーズ時に再起動させる
+    esp_task_wdt_add(NULL);
+
+    // Wire.beginはsetupで行うため削除
+    
     depthSensor.setFluidDensity(g_isSeawater ? 1029.0f : 997.0f);
+    
+    // 初期化ループにもWDTリセットとディレイを入れる
     while (!depthSensor.init())
+    {
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const TickType_t xFrequency = pdMS_TO_TICKS(50);
     uint8_t txBuf[128];
+    
+    // 連続エラーカウンタを追加
+    int errorCount = 0;
+    const int MAX_ERROR_COUNT = 20; // 50ms * 20 = 1000ms (1秒)
+
     for (;;)
     {
+        // ループごとにWDTをリセット
+        esp_task_wdt_reset();
+
         bool ok = depthSensor.read();
+
+        // 成功したらカウンタをリセット、失敗したらカウントアップ
+        if (ok) 
+        {
+            errorCount = 0;
+        }
+        else 
+        {
+            errorCount++;
+        }
+
+        // 自動復旧ロジック: 1秒間通信不能ならバスリセットを試みる
+        if (errorCount > MAX_ERROR_COUNT)
+        {
+            // バスリカバリー付き初期化を実行
+            // init()内部で wirePort->end() -> forceBusReset() -> wirePort->begin() が走る
+            if (depthSensor.init()) 
+            {
+                errorCount = 0; // 復旧成功
+            }
+            else 
+            {
+                // 復旧失敗時は少し待ってリトライ（スパム防止）
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+        }
+        
         if (xSemaphoreTake(depthMutex, 5) == pdTRUE)
         {
             sharedDepth.depth = ok ? depthSensor.depthVal : 0.0f;
@@ -418,6 +494,7 @@ void Task_Depth(void *pvParameters)
             sharedDepth.ok = ok;
             xSemaphoreGive(depthMutex);
         }
+
         if (ok)
         {
             Msg_Depth msg = protolink__driver_msgs__Depth_driver_msgs__Depth_init_zero;
@@ -439,6 +516,7 @@ void Task_Depth(void *pvParameters)
                 }
             }
         }
+        
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
 }
@@ -497,13 +575,13 @@ void Task_NetRx(void *pvParameters)
                     }
                     if (msg.has_log_current)
                     {
-                        g_logCurrent = msg.log_current / 200.0f;
+                        g_logCurrent = msg.log_current; // 200.0f;
                         g_logConsumedAh += g_logCurrent * (dt_sec / 3600.0f);
                         sendRP2040Uart('v', (int32_t)(g_logCurrent * 1000));
                     }
                     if (msg.has_act_current)
                     {
-                        g_actCurrent = msg.act_current / 200.0f;
+                        g_actCurrent = msg.act_current; // 200.0f;
                         g_actConsumedAh += g_actCurrent * (dt_sec / 3600.0f);
                         sendRP2040Uart('a', (int32_t)(g_actCurrent * 1000));
                     }
@@ -636,6 +714,7 @@ void Task_NetRx(void *pvParameters)
 
 void Task_Main(void *pvParameters)
 {
+    // メインタスクもWDTで保護
     esp_task_wdt_add(NULL);
     uint32_t count = 0;
     uint8_t txBuf[256];
