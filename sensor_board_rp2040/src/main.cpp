@@ -29,7 +29,7 @@ extern "C"
 // --- Servo ---
 #define PIN_SERVO_1 0
 #define PIN_SERVO_POWER 6
-#define SERVO_MIN_LIMIT_DEG 60
+#define SERVO_MIN_LIMIT_DEG 50
 #define SERVO_MAX_LIMIT_DEG 180
 
 // --- Power Monitor Inputs ---
@@ -229,7 +229,7 @@ void setup1()
   statusStrip.setBrightness(255);
 
   effectStrip.show();
-  // statusStrip.show();
+  statusStrip.show();
 
   startupAnimation();
 
@@ -333,7 +333,7 @@ void loop1()
       {
         statusStrip.setPixelColor(i, g_overrideColor);
       }
-      // statusStrip.show();
+      statusStrip.show();
     }
     else
     {
@@ -544,7 +544,7 @@ void drawBatteryBar()
 
   int centerVal = 100 + (int)(breath * 155);
   statusStrip.setPixelColor(CENTER_IDX, centerVal, centerVal, centerVal);
-  // statusStrip.show();
+  statusStrip.show();
 }
 
 // ==========================================================================
@@ -903,7 +903,7 @@ void startupAnimation()
     for (int i = 0; i < NUM_LEDS_STATUS; i++)
       statusStrip.setPixelColor(i, statusStrip.Color(0, b, b));
     effectStrip.show();
-    // statusStrip.show();
+    statusStrip.show();
     delay(20);
     watchdog_update();
   }
@@ -915,7 +915,7 @@ void startupAnimation()
     for (int i = 0; i < NUM_LEDS_STATUS; i++)
       statusStrip.setPixelColor(i, statusStrip.Color(0, b, b));
     effectStrip.show();
-    // statusStrip.show();
+    statusStrip.show();
     delay(10);
   }
   delay(500);
@@ -948,12 +948,12 @@ void startupAnimation()
       if (effFill < NUM_LEDS_EFFECT)
         effectStrip.setPixelColor(effFill, c_proj);
       effectStrip.show();
-      // statusStrip.show();
+      statusStrip.show();
       delay(35);
     }
     statusStrip.setPixelColor(progress, c_wht);
     statusStrip.setPixelColor(30 - progress, c_wht);
-    // statusStrip.show();
+    statusStrip.show();
     delay(60);
     watchdog_update();
   }
@@ -962,7 +962,7 @@ void startupAnimation()
     statusStrip.setPixelColor(i, c_wht);
   for (int i = 0; i < NUM_LEDS_EFFECT; i++)
     effectStrip.setPixelColor(i, c_wht);
-  // statusStrip.show();
+  statusStrip.show();
   effectStrip.show();
   delay(400);
 
@@ -972,13 +972,13 @@ void startupAnimation()
       statusStrip.setPixelColor(i, statusStrip.Color(b, b, b));
     for (int i = 0; i < NUM_LEDS_EFFECT; i++)
       effectStrip.setPixelColor(i, effectStrip.Color(b, b, b));
-    // statusStrip.show();
+    statusStrip.show();
     effectStrip.show();
     delay(5);
   }
   statusStrip.clear();
   effectStrip.clear();
-  // statusStrip.show();
+  statusStrip.show();
   effectStrip.show();
   delay(200);
 }
@@ -994,7 +994,7 @@ void drawLeakAlert()
   effectStrip.show();
   for (int i = 0; i < NUM_LEDS_STATUS; i++)
     statusStrip.setPixelColor(i, color);
-  // statusStrip.show();
+  statusStrip.show();
   state = !state;
   delay(100);
 }
