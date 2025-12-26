@@ -51,6 +51,7 @@ void GetWritePWM(float *thrust);
 void WriteLEDs();
 void LimitThrust();
 void StopAllActuators(); // 全停止用
+void StopThrusters();
 void onPacketReceived(const uint8_t* buffer, size_t size);
 
 template<std::size_t N>
@@ -141,7 +142,7 @@ void loop() {
 
   // タイムアウト監視
   if (SERIAL_TIMEOUT < (millis() - last_time)) {
-    StopAllActuators();
+    StopThrusters();
     is_update = true; // PWM書き込みを実行させるため
   }
 
@@ -167,9 +168,18 @@ void StopAllActuators() {
   WriteLEDs();
 }
 
+void StopThrusters() {
+  for (int i = 0; i < THRUSTER_NUM; i++) {
+    thrust_value[i] = 0.0f;
+  }
+  GetWritePWM(thrust_value);
+}
+
 void WriteLEDs() {
   // LEDへのPWM出力
-  // 必要に応じて範囲制限などをここに追加してください
+  // limit (1100 ~ 1900)
+  led_pwm[0] = max(1100, min(1900, led_pwm[0]));
+  led_pwm[1] = max(1100, min(1900, led_pwm[1]));
   leds[0].writeMicroseconds(led_pwm[0]);
   leds[1].writeMicroseconds(led_pwm[1]);
 }
