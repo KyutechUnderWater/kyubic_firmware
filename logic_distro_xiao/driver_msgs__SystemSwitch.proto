@@ -22,6 +22,6 @@ optional bool jetson = 3;
 optional bool dvl = 4;
 optional bool com = 5;
 optional bool ex1 = 6;
-optional bool ex2 = 7;
+optional bool ex8 = 7;
 optional bool actuator = 8;
 }

@@ -41,8 +41,8 @@ typedef struct _protolink__driver_msgs__SystemSwitch_driver_msgs__SystemSwitch {
     bool com;
     bool has_ex1;
     bool ex1;
-    bool has_ex2;
-    bool ex2;
+    bool has_ex8;
+    bool ex8;
     bool has_actuator;
     bool actuator;
 } protolink__driver_msgs__SystemSwitch_driver_msgs__SystemSwitch;
@@ -74,7 +74,7 @@ extern "C" {
 #define protolink__driver_msgs__SystemSwitch_driver_msgs__SystemSwitch_dvl_tag 4
 #define protolink__driver_msgs__SystemSwitch_driver_msgs__SystemSwitch_com_tag 5
 #define protolink__driver_msgs__SystemSwitch_driver_msgs__SystemSwitch_ex1_tag 6
-#define protolink__driver_msgs__SystemSwitch_driver_msgs__SystemSwitch_ex2_tag 7
+#define protolink__driver_msgs__SystemSwitch_driver_msgs__SystemSwitch_ex8_tag 7
 #define protolink__driver_msgs__SystemSwitch_driver_msgs__SystemSwitch_actuator_tag 8
 
 /* Struct field encoding specification for nanopb */
@@ -85,7 +85,7 @@ X(a, STATIC,   OPTIONAL, BOOL,     jetson,            3) \
 X(a, STATIC,   OPTIONAL, BOOL,     dvl,               4) \
 X(a, STATIC,   OPTIONAL, BOOL,     com,               5) \
 X(a, STATIC,   OPTIONAL, BOOL,     ex1,               6) \
-X(a, STATIC,   OPTIONAL, BOOL,     ex2,               7) \
+X(a, STATIC,   OPTIONAL, BOOL,     ex8,               7) \
 X(a, STATIC,   OPTIONAL, BOOL,     actuator,          8)
 #define protolink__driver_msgs__SystemSwitch_driver_msgs__SystemSwitch_CALLBACK NULL
 #define protolink__driver_msgs__SystemSwitch_driver_msgs__SystemSwitch_DEFAULT NULL
