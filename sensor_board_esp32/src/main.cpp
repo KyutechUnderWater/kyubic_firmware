@@ -318,10 +318,16 @@ float estimateConsumedAhFromVoltage(float voltage, float capacityAh);
 
 void setup()
 {
+    //ラッチアップ防止
+    delay(3000); 
+
     Serial.begin(115200);
     
-    // WDTの初期化時間を少し長めに設定 (起動時の遅延対策)
+    // WDTの初期化 (60秒)
     esp_task_wdt_init(60, true);
+
+    // Setup実行中の自身の監視
+    esp_task_wdt_add(NULL);
 
     wire1Mutex = xSemaphoreCreateMutex();
     depthMutex = xSemaphoreCreateMutex();
@@ -352,6 +358,8 @@ void setup()
     Wire1.setClock(400000);
     Wire1.setTimeOut(50);
 
+    esp_task_wdt_reset(); // WDTリセット
+
     SPI.begin(W5500_SCLK, W5500_MISO, W5500_MOSI, W5500_CS);
     SPI.setFrequency(20000000);
     pinMode(W5500_RST, OUTPUT);
@@ -374,6 +382,8 @@ void setup()
     udpRxZed.begin(PORT_RX_ZED);
     udpRxPower.begin(PORT_RX_POWER);
 
+    esp_task_wdt_reset(); // WDTリセット
+
     bmeSensor.setI2CAddress(0x77);
     if (bmeSensor.beginI2C(Wire1))
         g_bmeFound = true;
@@ -391,6 +401,8 @@ void setup()
         display.println("V30.6 SYSTEM OK");
         display.display();
     }
+
+    esp_task_wdt_reset(); // WDTリセット
 
     // GNSS Init & Explicit PPS (TP1) Configuration
     {
@@ -421,6 +433,9 @@ void setup()
     }
 
     g_lastPowerUpdateMs = millis();
+
+    // 自身のWDT監視を解除
+    esp_task_wdt_delete(NULL);
 
     // FIX: Depthタスクの優先度を 10 から 5 に下げる
     xTaskCreatePinnedToCore(Task_Depth, "Depth", 8192, NULL, 5, NULL, 0);
