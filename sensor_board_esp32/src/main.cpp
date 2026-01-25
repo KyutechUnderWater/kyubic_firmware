@@ -316,6 +316,20 @@ void drawCorner(int x, int y, int w, int h);
 void drawSegBar(int x, int y, int w, int h, float val, float maxVal, bool usePercent);
 float estimateConsumedAhFromVoltage(float voltage, float capacityAh);
 
+uint64_t mainDelta, oledDelta, timeDelta, gnssDelta, envDelta, batDelta, depthDelta;
+
+void initDeltaAll(){
+    uint64_t now = millis();
+    mainDelta = oledDelta = timeDelta = gnssDelta = envDelta = batDelta = depthDelta = now;
+}
+
+uint64_t CalcDelta(uint64_t & prev_time){
+    uint64_t now = millis();
+    uint64_t delta = now - prev_time;
+    prev_time = now;
+    return delta;
+}
+
 void setup()
 {
     //ラッチアップ防止
@@ -437,6 +451,9 @@ void setup()
     // 自身のWDT監視を解除
     esp_task_wdt_delete(NULL);
 
+    // 計測時間のリセット
+    initDeltaAll();
+
     // FIX: Depthタスクの優先度を 10 から 5 に下げる
     xTaskCreatePinnedToCore(Task_Depth, "Depth", 8192, NULL, 5, NULL, 0);
     xTaskCreatePinnedToCore(Task_NetRx, "Rx", 8192, NULL, 3, NULL, 1);
@@ -491,13 +508,16 @@ void Task_Depth(void *pvParameters)
         {
             // バスリカバリー付き初期化を実行
             // init()内部で wirePort->end() -> forceBusReset() -> wirePort->begin() が走る
+            Serial.println("[Depth] !! Sensor Timeout. Recovering Bus... !!");
             if (depthSensor.init()) 
             {
+                Serial.println("[Depth] Recovery Success!");
                 errorCount = 0; // 復旧成功
             }
             else 
             {
                 // 復旧失敗時は少し待ってリトライ（スパム防止）
+                Serial.println("[Depth] Recovery Failed.");
                 vTaskDelay(pdMS_TO_TICKS(100));
             }
         }
@@ -528,6 +548,11 @@ void Task_Depth(void *pvParameters)
                     udpSender.write(txBuf, stream.bytes_written);
                     udpSender.endPacket();
                     xSemaphoreGive(ethMutex);
+                    Serial.printf("[%5lums] [Depth] Tx OK | D: %.2fm T: %.1fC\n", CalcDelta(depthDelta), depthSensor.depthVal, depthSensor.tempVal);
+                }
+                else
+                {
+                    Serial.println("[Depth] Tx Skip (Eth Mutex Busy)");
                 }
             }
         }
@@ -737,11 +762,13 @@ void Task_Main(void *pvParameters)
     for (;;)
     {
         esp_task_wdt_reset();
+
+        Serial.printf("[%5lums] [Main] Loop Start\n", CalcDelta(mainDelta));
+
         checkRP2040Incoming();
 
         if (g_gnssFound)
         {
-            myGNSS.checkUblox();
             myGNSS.checkUblox();
         }
 
@@ -763,16 +790,22 @@ void Task_Main(void *pvParameters)
 
             if (slot == 0)
             {
-                if (count % 10 == 0)
+                if (count % 25 == 0){
+                    Serial.printf("[%5lums] [Main] Update OLED... ", CalcDelta(oledDelta));
                     updateOLED();
+                    Serial.println("Done");
+                }
                 esp_task_wdt_reset();
             }
             else if (slot == 1)
             {
+                Serial.printf("[%5lums] [Main] TimeSync... ", CalcDelta(timeDelta));
                 handleTimeSync();
+                Serial.println("Done");
             }
             else if (slot == 2)
             { // Env Tx
+                Serial.printf("[%5lums] [Main] Env Tx... ", CalcDelta(envDelta));
                 if (g_bmeFound)
                 {
                     Msg_Environment msg = protolink__driver_msgs__Environment_driver_msgs__Environment_init_zero;
@@ -792,23 +825,27 @@ void Task_Main(void *pvParameters)
                             udpSender.write(txBuf, stream.bytes_written);
                             udpSender.endPacket();
                             xSemaphoreGive(ethMutex);
+                            Serial.printf("[Env] Tx OK | T: %.1f H: %.1f P: %.1f\n", msg.temperature, msg.humidity, msg.pressure);
                         }
                     }
+                    else
+                        Serial.println("[Env] Tx NG | nanopb encode faild");
                 }
             }
             else if (slot == 3)
             { // GNSS Tx
+                Serial.printf("[%5lums] [Main] GNSS Tx... ", CalcDelta(gnssDelta));
                 if (g_gnssFound)
                 {
                     Msg_RtcGnss gMsg = protolink__driver_msgs__RtcGnss_driver_msgs__RtcGnss_init_zero;
                     gMsg.has_latitude = true;
-                    gMsg.latitude = myGNSS.getLatitude() / 10000000.0;
+                    gMsg.latitude = myGNSS.getLatitude(0) / 10000000.0;
                     gMsg.has_longitude = true;
-                    gMsg.longitude = myGNSS.getLongitude() / 10000000.0;
+                    gMsg.longitude = myGNSS.getLongitude(0) / 10000000.0;
                     gMsg.has_altitude = true;
-                    gMsg.altitude = myGNSS.getAltitude() / 1000.0;
+                    gMsg.altitude = myGNSS.getAltitude(0) / 1000.0;
                     gMsg.has_satellites = true;
-                    gMsg.satellites = myGNSS.getSIV();
+                    gMsg.satellites = myGNSS.getSIV(0);
                     pb_ostream_t s1 = pb_ostream_from_buffer(txBuf, sizeof(txBuf));
                     if (pb_encode(&s1, protolink__driver_msgs__RtcGnss_driver_msgs__RtcGnss_fields, &gMsg))
                     {
@@ -819,12 +856,16 @@ void Task_Main(void *pvParameters)
                             udpSender.write(txBuf, s1.bytes_written);
                             udpSender.endPacket();
                             xSemaphoreGive(ethMutex);
+                            Serial.printf("[GNSS] Tx OK | Sat: %d\n", gMsg.satellites);
                         }
                     }
+                    else
+                        Serial.println("[GNSS] Tx NG | nanopb encode faild");
                 }
             }
             else if (slot == 4)
             { // Battery/Signal Tx
+                Serial.printf("[%5lums] [Main] Bat Tx... ", CalcDelta(batDelta));
                 if (g_rp2040Alive)
                 {
                     Msg_BtnBatt bMsg = protolink__driver_msgs__ButtonBatteryState_driver_msgs__ButtonBatteryState_init_zero;
@@ -842,8 +883,11 @@ void Task_Main(void *pvParameters)
                             udpSender.write(txBuf, stream.bytes_written);
                             udpSender.endPacket();
                             xSemaphoreGive(ethMutex);
+                            Serial.printf("[Bat] Tx OK | V: %.1f/%.1f\n", g_logVoltage, g_actVoltage);
                         }
                     }
+                    else
+                        Serial.println("[Bat] Tx NG | nanopb encode faild");
                     vTaskDelay(pdMS_TO_TICKS(5));
 
                     Msg_SystemStatus sMsg = protolink__driver_msgs__SystemStatus_driver_msgs__SystemStatus_init_zero;
@@ -870,6 +914,9 @@ void Task_Main(void *pvParameters)
                 }
             }
             xSemaphoreGive(wire1Mutex);
+        }
+        else{
+            Serial.println("[Main] Failed to take Wire1 Mutex!");
         }
 
         if (millis() - lastPageChange > 4000)
@@ -906,12 +953,12 @@ void handleTimeSync()
 {
     static unsigned long lastSync = 0;
     uint8_t buf[128];
-    if (g_gnssFound && myGNSS.getSIV() >= 4 && myGNSS.getTimeValid())
+    if (g_gnssFound && myGNSS.getSIV(0) >= 4 && myGNSS.getTimeValid(0))
     {
         if (millis() - lastSync > 60000)
         {
-            DateTime utc = DateTime(myGNSS.getYear(), myGNSS.getMonth(), myGNSS.getDay(),
-                                    myGNSS.getHour(), myGNSS.getMinute(), myGNSS.getSecond());
+            DateTime utc = DateTime(myGNSS.getYear(0), myGNSS.getMonth(0), myGNSS.getDay(0),
+                                    myGNSS.getHour(0), myGNSS.getMinute(0), myGNSS.getSecond(0));
             DateTime jst = utc + TimeSpan(0, 9, 0, 0);
             rtc.adjust(jst);
             lastSync = millis();
@@ -1218,16 +1265,16 @@ void updateOLED()
         {
             drawGuiHeader("GNSS");
             display.setCursor(2, 16);
-            display.printf("Lat: %.6f", myGNSS.getLatitude() / 10000000.0);
+            display.printf("Lat: %.6f", myGNSS.getLatitude(0) / 10000000.0);
             display.setCursor(2, 26);
-            display.printf("Lon: %.6f", myGNSS.getLongitude() / 10000000.0);
+            display.printf("Lon: %.6f", myGNSS.getLongitude(0) / 10000000.0);
 
             // Fix Type Logic for Altitude Reliability
-            byte fixType = myGNSS.getFixType(); // 0=No, 1=DR, 2=2D, 3=3D...
+            byte fixType = myGNSS.getFixType(0); // 0=No, 1=DR, 2=2D, 3=3D...
             display.setCursor(2, 36);
             if (fixType >= 3)
             {
-                display.printf("Alt: %.1f m (3D)", myGNSS.getAltitude() / 1000.0);
+                display.printf("Alt: %.1f m (3D)", myGNSS.getAltitude(0) / 1000.0);
             }
             else if (fixType == 2)
             {
